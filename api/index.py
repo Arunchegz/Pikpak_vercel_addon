@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import re
 import requests
-import asyncio
 from upstash_redis import Redis
 
 app = FastAPI()
@@ -62,11 +61,8 @@ def get_movie_info(imdb_id: str):
     year = str(meta.get("year", ""))
     return title, year
 
-async def safe_call(func, *args, **kwargs):
-    return await asyncio.wait_for(func(*args, **kwargs), timeout=20)
-
 # -----------------------
-# PikPak client (ONLY email + password, compatible with your pikpakapi)
+# PikPak client
 # -----------------------
 client = None
 
@@ -80,35 +76,17 @@ async def get_client():
     if not EMAIL or not PASSWORD:
         raise Exception("PIKPAK_EMAIL or PIKPAK_PASSWORD is missing")
 
-    def new_client():
-        # Your installed pikpakapi only supports this form
-        return PikPakApi(EMAIL, PASSWORD)
-
-    # First login
     if client is None:
-        print("Logging in to PikPak...")
-        client = new_client()
-        await client.login()
-        return client
-
-    # Try refresh token
-    try:
-        await client.refresh_access_token()
-    except Exception as e:
-        print("Refresh failed, re-login:", e)
-        client = new_client()
+        client = PikPakApi(EMAIL, PASSWORD)
         await client.login()
 
     return client
 
-# -----------------------
-# Collect all files (root must be "root")
-# -----------------------
-async def collect_files(pk, parent_id="root", result=None):
+async def collect_files(pk, parent_id="", result=None):
     if result is None:
         result = []
 
-    data = await safe_call(pk.file_list, parent_id=parent_id)
+    data = await pk.file_list(parent_id=parent_id)
     files = data.get("files", [])
 
     for f in files:
@@ -131,15 +109,15 @@ async def root():
     }
 
 # -----------------------
-# Manifest
+# Manifest with Catalog
 # -----------------------
 @app.get("/manifest.json")
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.3.2",
+        "version": "1.2.0",
         "name": "PikPak Cloud",
-        "description": "Browse and stream files from your PikPak cloud (Redis + token refresh)",
+        "description": "Browse and stream files from your PikPak cloud (with Redis caching)",
         "types": ["movie"],
         "resources": ["stream", "catalog"],
         "catalogs": [
@@ -193,7 +171,7 @@ async def catalog(type: str, id: str):
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
 
-    # Case 1: Direct play from catalog
+    # Case 1: Playing directly from Catalog (My PikPak Files)
     if id.startswith("pikpak:"):
         file_id = id.replace("pikpak:", "")
         pk = await get_client()
@@ -202,7 +180,7 @@ async def stream(type: str, id: str):
         if cached:
             url = cached
         else:
-            data = await safe_call(pk.get_download_url, file_id)
+            data = await pk.get_download_url(file_id)
 
             url = None
             links = data.get("links", {})
@@ -227,7 +205,7 @@ async def stream(type: str, id: str):
             }]
         }
 
-    # Case 2: IMDb matching
+    # Case 2: Normal IMDb movie matching
     if type != "movie":
         return {"streams": []}
 
@@ -269,7 +247,7 @@ async def stream(type: str, id: str):
             if cached:
                 url = cached
             else:
-                data = await safe_call(pk.get_download_url, file_id)
+                data = await pk.get_download_url(file_id)
 
                 url = None
                 links = data.get("links", {})
