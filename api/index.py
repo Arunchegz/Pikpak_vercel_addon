@@ -1,22 +1,21 @@
 from fastapi import FastAPI
 import os
-from pikpakapi import PikPak   # based on Quan666/PikPakAPI
+from pikpakapi.pikpak import PikPakApi
 
 app = FastAPI()
 
-# Environment variables
 EMAIL = os.environ.get("PIKPAK_EMAIL")
 PASSWORD = os.environ.get("PIKPAK_PASSWORD")
 
-# Create client (lazy login is better for Vercel)
 client = None
 
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm")
 
+
 def get_client():
     global client
     if client is None:
-        client = PikPak(EMAIL, PASSWORD)
+        client = PikPakApi(EMAIL, PASSWORD)
         client.login()
     return client
 
@@ -38,23 +37,23 @@ def manifest():
 def stream(type: str, id: str):
     pk = get_client()
 
-    # List root files (depends on PikPakAPI function names)
-    files = pk.list_files()
+    # In Quan666 API, root listing is usually:
+    files = pk.file_list(parent_id="")
 
     streams = []
 
-    for f in files:
+    for f in files.get("files", []):
         name = f["name"].lower()
         if not name.endswith(VIDEO_EXT):
             continue
 
-        # Get direct download URL
-        url = pk.get_download_url(f["id"])
+        # Download URL call
+        link = pk.get_download_url(f["id"])
 
         streams.append({
             "name": "PikPak",
             "title": f["name"],
-            "url": url
+            "url": link
         })
 
     return {"streams": streams}
