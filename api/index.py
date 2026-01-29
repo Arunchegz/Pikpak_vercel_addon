@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import re
 import requests
+import asyncio
 from upstash_redis import Redis
 
 app = FastAPI()
@@ -61,8 +62,11 @@ def get_movie_info(imdb_id: str):
     year = str(meta.get("year", ""))
     return title, year
 
+async def safe_call(func, *args, **kwargs):
+    return await asyncio.wait_for(func(*args, **kwargs), timeout=20)
+
 # -----------------------
-# PikPak client
+# PikPak client (with refresh + relogin)
 # -----------------------
 client = None
 
@@ -76,7 +80,18 @@ async def get_client():
     if not EMAIL or not PASSWORD:
         raise Exception("PIKPAK_EMAIL or PIKPAK_PASSWORD is missing")
 
+    # First time login
     if client is None:
+        print("Logging into PikPak...")
+        client = PikPakApi(EMAIL, PASSWORD)
+        await client.login()
+        return client
+
+    # Try refresh token
+    try:
+        await client.refresh_access_token()
+    except Exception as e:
+        print("Refresh token failed, re-logging:", e)
         client = PikPakApi(EMAIL, PASSWORD)
         await client.login()
 
@@ -86,7 +101,7 @@ async def collect_files(pk, parent_id="", result=None):
     if result is None:
         result = []
 
-    data = await pk.file_list(parent_id=parent_id)
+    data = await safe_call(pk.file_list, parent_id=parent_id)
     files = data.get("files", [])
 
     for f in files:
@@ -109,15 +124,15 @@ async def root():
     }
 
 # -----------------------
-# Manifest with Catalog
+# Manifest
 # -----------------------
 @app.get("/manifest.json")
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.2.0",
+        "version": "1.2.1",
         "name": "PikPak Cloud",
-        "description": "Browse and stream files from your PikPak cloud (with Redis caching)",
+        "description": "Browse and stream files from your PikPak cloud (with Redis caching + token refresh)",
         "types": ["movie"],
         "resources": ["stream", "catalog"],
         "catalogs": [
@@ -171,7 +186,7 @@ async def catalog(type: str, id: str):
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
 
-    # Case 1: Playing directly from Catalog (My PikPak Files)
+    # Case 1: Direct play from catalog
     if id.startswith("pikpak:"):
         file_id = id.replace("pikpak:", "")
         pk = await get_client()
@@ -180,7 +195,7 @@ async def stream(type: str, id: str):
         if cached:
             url = cached
         else:
-            data = await pk.get_download_url(file_id)
+            data = await safe_call(pk.get_download_url, file_id)
 
             url = None
             links = data.get("links", {})
@@ -205,7 +220,7 @@ async def stream(type: str, id: str):
             }]
         }
 
-    # Case 2: Normal IMDb movie matching
+    # Case 2: IMDb matching
     if type != "movie":
         return {"streams": []}
 
@@ -247,7 +262,7 @@ async def stream(type: str, id: str):
             if cached:
                 url = cached
             else:
-                data = await pk.get_download_url(file_id)
+                data = await safe_call(pk.get_download_url, file_id)
 
                 url = None
                 links = data.get("links", {})
