@@ -139,7 +139,7 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.4.1",
+        "version": "1.5.0",
         "name": "PikPak Cloud",
         "description": "Browse and stream files from your PikPak cloud with Redis caching",
         "types": ["movie"],
@@ -162,11 +162,8 @@ async def catalog(type: str, id: str):
     if type != "movie" or id != "pikpak":
         return {"metas": []}
 
-    try:
-        pk = await get_client()
-        files = await get_files_with_auto_refresh(pk)
-    except Exception as e:
-        return {"metas": [], "error": str(e)}
+    pk = await get_client()
+    files = await get_files_with_auto_refresh(pk)
 
     if not files:
         files = await collect_files(pk)
@@ -197,7 +194,7 @@ async def catalog(type: str, id: str):
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
 
-    # Play directly from catalog
+    # Direct play from catalog
     if id.startswith("pikpak:"):
         file_id = id.replace("pikpak:", "")
         pk = await get_client()
@@ -231,24 +228,15 @@ async def stream(type: str, id: str):
             }]
         }
 
-    # IMDb matching
+    # IMDb movie matching
     if type != "movie":
         return {"streams": []}
 
-    try:
-        movie_title, movie_year = get_movie_info(id)
-    except Exception as e:
-        return {"streams": [], "error": str(e)}
-
+    movie_title, movie_year = get_movie_info(id)
     movie_title_n = normalize(movie_title)
 
-    try:
-        pk = await get_client()
-        all_files = await get_files_with_auto_refresh(pk)
-    except Exception as e:
-        return {"streams": [], "error": str(e)}
-
-    streams = []
+    pk = await get_client()
+    all_files = await get_files_with_auto_refresh(pk)
 
     async def build_streams(files):
         result = []
@@ -295,17 +283,13 @@ async def stream(type: str, id: str):
             })
         return result
 
-    # First try cached file list
+    # First try cached list
     streams = await build_streams(all_files)
 
-    # If not found → force refresh and retry
+    # If nothing found, refresh file list and retry
     if not streams:
-        try:
-            print("Cache miss → refreshing PikPak file list")
-            fresh_files = await collect_files(pk)
-            set_cached_files(fresh_files)
-            streams = await build_streams(fresh_files)
-        except Exception as e:
-            print("Auto-refresh failed:", e)
+        fresh_files = await collect_files(pk)
+        set_cached_files(fresh_files)
+        streams = await build_streams(fresh_files)
 
     return {"streams": streams}
