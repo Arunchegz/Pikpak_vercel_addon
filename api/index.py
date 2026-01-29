@@ -87,7 +87,7 @@ def set_cached_url(file_id, url, expires_at):
         pass
 
 
-# ---------------- ROUTESS ----------------
+# ---------------- ROUTES ----------------
 
 @app.get("/")
 async def root():
