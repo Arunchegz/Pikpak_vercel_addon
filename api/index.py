@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 import os
-from pikpak import PikPak
+from pikpakapi import PikPakApi
 
 app = FastAPI()
 
@@ -10,10 +10,11 @@ PASSWORD = os.environ.get("PIKPAK_PASSWORD")
 client = None
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm")
 
+
 def get_client():
     global client
     if client is None:
-        client = PikPak(EMAIL, PASSWORD)
+        client = PikPakApi(EMAIL, PASSWORD)
         client.login()
     return client
 
@@ -35,7 +36,7 @@ def manifest():
 def stream(type: str, id: str):
     pk = get_client()
 
-    # Root file listing
+    # root directory
     data = pk.file_list(parent_id="")
     files = data.get("files", [])
 
