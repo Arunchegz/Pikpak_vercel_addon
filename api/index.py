@@ -4,19 +4,39 @@ from pikpakapi import PikPakApi
 
 app = FastAPI()
 
+# Read credentials from Vercel Environment Variables
 EMAIL = os.environ.get("PIKPAK_EMAIL")
 PASSWORD = os.environ.get("PIKPAK_PASSWORD")
 
+# Global client (Vercel may reuse the container)
 client = None
-VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm")
+
+# Supported video extensions
+VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
 
 
 def get_client():
+    """
+    Create and login PikPak client once.
+    Reused across requests if the Vercel instance is warm.
+    """
     global client
     if client is None:
+        if not EMAIL or not PASSWORD:
+            raise Exception("PIKPAK_EMAIL or PIKPAK_PASSWORD environment variable not set")
+
         client = PikPakApi(EMAIL, PASSWORD)
         client.login()
     return client
+
+
+@app.get("/")
+def root():
+    return {
+        "status": "ok",
+        "message": "PikPak Stremio addon running",
+        "manifest": "/manifest.json"
+    }
 
 
 @app.get("/manifest.json")
@@ -34,25 +54,60 @@ def manifest():
 
 @app.get("/stream/{type}/{id}.json")
 def stream(type: str, id: str):
-    pk = get_client()
+    # Step 1: Login / get client
+    try:
+        pk = get_client()
+    except Exception as e:
+        return {
+            "streams": [],
+            "error": "Login failed",
+            "detail": str(e)
+        }
 
-    # root directory
-    data = pk.file_list(parent_id="")
+    # Step 2: List root files
+    try:
+        data = pk.file_list(parent_id="")
+    except Exception as e:
+        return {
+            "streams": [],
+            "error": "file_list failed",
+            "detail": str(e)
+        }
+
     files = data.get("files", [])
-
     streams = []
 
+    # Step 3: Build Stremio streams
     for f in files:
-        name = f["name"].lower()
-        if not name.endswith(VIDEO_EXT):
+        try:
+            name = f.get("name", "")
+            file_id = f.get("id")
+
+            if not name or not file_id:
+                continue
+
+            lname = name.lower()
+            if not lname.endswith(VIDEO_EXT):
+                continue
+
+            # Step 4: Get direct download link
+            try:
+                url = pk.get_download_url(file_id)
+            except Exception as e:
+                print("Download URL error for", name, ":", e)
+                continue
+
+            streams.append({
+                "name": "PikPak",
+                "title": name,
+                "url": url
+            })
+
+        except Exception as e:
+            # Never let a single broken file crash the addon
+            print("File processing error:", f, "Error:", e)
             continue
 
-        url = pk.get_download_url(f["id"])
-
-        streams.append({
-            "name": "PikPak",
-            "title": f["name"],
-            "url": url
-        })
-
-    return {"streams": streams}
+    return {
+        "streams": streams
+    }
