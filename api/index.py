@@ -67,7 +67,7 @@ async def safe_call(func, *args, **kwargs):
     return await asyncio.wait_for(func(*args, **kwargs), timeout=20)
 
 # -----------------------
-# PikPak client (with device headers + refresh + relogin)
+# PikPak client
 # -----------------------
 client = None
 
@@ -81,13 +81,16 @@ async def get_client():
     if not EMAIL or not PASSWORD:
         raise Exception("PIKPAK_EMAIL or PIKPAK_PASSWORD is missing")
 
+    # IMPORTANT:
+    # PikPakApi constructor is POSITIONAL, not keyword-based
+    # PikPakApi(email, password, device_id, user_agent)
     def new_client():
         device_id = str(uuid.uuid4())
         return PikPakApi(
-            email=EMAIL,
-            password=PASSWORD,
-            device_id=device_id,
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+            EMAIL,
+            PASSWORD,
+            device_id,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
         )
 
     # First login
@@ -97,7 +100,7 @@ async def get_client():
         await client.login()
         return client
 
-    # Refresh token
+    # Try refresh
     try:
         await client.refresh_access_token()
     except Exception as e:
@@ -107,7 +110,10 @@ async def get_client():
 
     return client
 
-async def collect_files(pk, parent_id="", result=None):
+# -----------------------
+# Collect all files (root must be 'root')
+# -----------------------
+async def collect_files(pk, parent_id="root", result=None):
     if result is None:
         result = []
 
@@ -140,9 +146,9 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.3.0",
+        "version": "1.3.1",
         "name": "PikPak Cloud",
-        "description": "Browse and stream files from your PikPak cloud (Redis cache + token refresh + device auth)",
+        "description": "Browse and stream files from your PikPak cloud (Redis + token refresh + device auth)",
         "types": ["movie"],
         "resources": ["stream", "catalog"],
         "catalogs": [
