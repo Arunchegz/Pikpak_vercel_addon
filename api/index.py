@@ -108,24 +108,107 @@ async def root():
         "manifest": "/manifest.json"
     }
 
+# -----------------------
+# Manifest with Catalog
+# -----------------------
 @app.get("/manifest.json")
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "name": "PikPak Cloud",
-        "description": "Stream files from your PikPak cloud (with Redis caching)",
-        "types": ["movie", "series"],
-        "resources": ["stream"],
-        "idPrefixes": ["tt"]
+        "description": "Browse and stream files from your PikPak cloud (with Redis caching)",
+        "types": ["movie"],
+        "resources": ["stream", "catalog"],
+        "catalogs": [
+            {
+                "type": "movie",
+                "id": "pikpak",
+                "name": "My PikPak Files"
+            }
+        ],
+        "idPrefixes": ["tt", "pikpak"]
     }
 
+# -----------------------
+# Catalog (Discover Page)
+# -----------------------
+@app.get("/catalog/{type}/{id}.json")
+async def catalog(type: str, id: str):
+    if type != "movie" or id != "pikpak":
+        return {"metas": []}
+
+    try:
+        pk = await get_client()
+        files = await collect_files(pk)
+    except Exception as e:
+        return {"metas": [], "error": str(e)}
+
+    metas = []
+
+    for f in files:
+        name = f.get("name", "")
+        file_id = f.get("id")
+
+        if not name or not file_id:
+            continue
+
+        if not name.lower().endswith(VIDEO_EXT):
+            continue
+
+        metas.append({
+            "id": f"pikpak:{file_id}",
+            "type": "movie",
+            "name": name,
+            "poster": "https://upload.wikimedia.org/wikipedia/commons/8/8c/PikPak_logo.png"
+        })
+
+    return {"metas": metas}
+
+# -----------------------
+# Stream Endpoint
+# -----------------------
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
+
+    # Case 1: Playing directly from Catalog (My PikPak Files)
+    if id.startswith("pikpak:"):
+        file_id = id.replace("pikpak:", "")
+        pk = await get_client()
+
+        cached = get_cached_url(file_id)
+        if cached:
+            url = cached
+        else:
+            data = await pk.get_download_url(file_id)
+
+            url = None
+            links = data.get("links", {})
+            if "application/octet-stream" in links:
+                url = links["application/octet-stream"].get("url")
+
+            if not url:
+                medias = data.get("medias", [])
+                if medias:
+                    url = medias[0].get("link", {}).get("url")
+
+            if not url:
+                return {"streams": []}
+
+            set_cached_url(file_id, url)
+
+        return {
+            "streams": [{
+                "name": "PikPak",
+                "title": "PikPak Direct Stream",
+                "url": url
+            }]
+        }
+
+    # Case 2: Normal IMDb movie matching
     if type != "movie":
         return {"streams": []}
 
-    # Get movie metadata
     try:
         movie_title, movie_year = get_movie_info(id)
     except Exception as e:
@@ -133,17 +216,11 @@ async def stream(type: str, id: str):
 
     movie_title_n = normalize(movie_title)
 
-    # Init PikPak
     try:
         pk = await get_client()
-    except Exception as e:
-        return {"streams": [], "error": f"PikPak init failed: {e}"}
-
-    # Collect all files
-    try:
         all_files = await collect_files(pk)
     except Exception as e:
-        return {"streams": [], "error": f"File listing failed: {e}"}
+        return {"streams": [], "error": str(e)}
 
     streams = []
 
@@ -166,14 +243,10 @@ async def stream(type: str, id: str):
             if movie_year and movie_year not in file_n:
                 continue
 
-            # -----------------------
-            # Redis cache check
-            # -----------------------
             cached = get_cached_url(file_id)
             if cached:
                 url = cached
             else:
-                # Generate new link
                 data = await pk.get_download_url(file_id)
 
                 url = None
@@ -189,7 +262,6 @@ async def stream(type: str, id: str):
                 if not url:
                     continue
 
-                # Store in Redis for 24 hours
                 set_cached_url(file_id, url)
 
             streams.append({
