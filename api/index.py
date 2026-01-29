@@ -82,7 +82,8 @@ async def get_client():
 
     return client
 
-async def collect_files(pk, parent_id="", result=None):
+# ROOT FIX: use "root" instead of ""
+async def collect_files(pk, parent_id="root", result=None):
     if result is None:
         result = []
 
@@ -109,17 +110,17 @@ async def root():
     }
 
 # -----------------------
-# Manifest with Catalog
+# Manifest
 # -----------------------
 @app.get("/manifest.json")
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.2.0",
+        "version": "1.2.1",
         "name": "PikPak Cloud",
-        "description": "Browse and stream files from your PikPak cloud (with Redis caching)",
+        "description": "Browse and stream files from your PikPak cloud",
+        "resources": ["catalog", "stream"],
         "types": ["movie"],
-        "resources": ["stream", "catalog"],
         "catalogs": [
             {
                 "type": "movie",
@@ -127,7 +128,7 @@ async def manifest():
                 "name": "My PikPak Files"
             }
         ],
-        "idPrefixes": ["tt", "pikpak"]
+        "idPrefixes": ["pikpak"]
     }
 
 # -----------------------
@@ -140,7 +141,7 @@ async def catalog(type: str, id: str):
 
     try:
         pk = await get_client()
-        files = await collect_files(pk)
+        files = await collect_files(pk, "root")
     except Exception as e:
         return {"metas": [], "error": str(e)}
 
@@ -160,7 +161,8 @@ async def catalog(type: str, id: str):
             "id": f"pikpak:{file_id}",
             "type": "movie",
             "name": name,
-            "poster": "https://upload.wikimedia.org/wikipedia/commons/8/8c/PikPak_logo.png"
+            "poster": "https://upload.wikimedia.org/wikipedia/commons/8/8c/PikPak_logo.png",
+            "posterShape": "poster"
         })
 
     return {"metas": metas}
@@ -171,7 +173,7 @@ async def catalog(type: str, id: str):
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
 
-    # Case 1: Playing directly from Catalog (My PikPak Files)
+    # Case 1: Playing directly from Catalog
     if id.startswith("pikpak:"):
         file_id = id.replace("pikpak:", "")
         pk = await get_client()
@@ -205,7 +207,7 @@ async def stream(type: str, id: str):
             }]
         }
 
-    # Case 2: Normal IMDb movie matching
+    # Case 2: IMDb movie matching (optional)
     if type != "movie":
         return {"streams": []}
 
@@ -218,7 +220,7 @@ async def stream(type: str, id: str):
 
     try:
         pk = await get_client()
-        all_files = await collect_files(pk)
+        all_files = await collect_files(pk, "root")
     except Exception as e:
         return {"streams": [], "error": str(e)}
 
