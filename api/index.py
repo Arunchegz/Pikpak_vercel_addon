@@ -4,7 +4,6 @@ import os
 import re
 import requests
 import asyncio
-import uuid
 from upstash_redis import Redis
 
 app = FastAPI()
@@ -67,7 +66,7 @@ async def safe_call(func, *args, **kwargs):
     return await asyncio.wait_for(func(*args, **kwargs), timeout=20)
 
 # -----------------------
-# PikPak client
+# PikPak client (ONLY email + password, compatible with your pikpakapi)
 # -----------------------
 client = None
 
@@ -81,17 +80,9 @@ async def get_client():
     if not EMAIL or not PASSWORD:
         raise Exception("PIKPAK_EMAIL or PIKPAK_PASSWORD is missing")
 
-    # IMPORTANT:
-    # PikPakApi constructor is POSITIONAL, not keyword-based
-    # PikPakApi(email, password, device_id, user_agent)
     def new_client():
-        device_id = str(uuid.uuid4())
-        return PikPakApi(
-            EMAIL,
-            PASSWORD,
-            device_id,
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-        )
+        # Your installed pikpakapi only supports this form
+        return PikPakApi(EMAIL, PASSWORD)
 
     # First login
     if client is None:
@@ -100,7 +91,7 @@ async def get_client():
         await client.login()
         return client
 
-    # Try refresh
+    # Try refresh token
     try:
         await client.refresh_access_token()
     except Exception as e:
@@ -111,7 +102,7 @@ async def get_client():
     return client
 
 # -----------------------
-# Collect all files (root must be 'root')
+# Collect all files (root must be "root")
 # -----------------------
 async def collect_files(pk, parent_id="root", result=None):
     if result is None:
@@ -146,9 +137,9 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.3.1",
+        "version": "1.3.2",
         "name": "PikPak Cloud",
-        "description": "Browse and stream files from your PikPak cloud (Redis + token refresh + device auth)",
+        "description": "Browse and stream files from your PikPak cloud (Redis + token refresh)",
         "types": ["movie"],
         "resources": ["stream", "catalog"],
         "catalogs": [
