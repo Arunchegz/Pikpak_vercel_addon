@@ -4,6 +4,7 @@ import os
 import re
 import requests
 import asyncio
+import uuid
 from upstash_redis import Redis
 
 app = FastAPI()
@@ -66,7 +67,7 @@ async def safe_call(func, *args, **kwargs):
     return await asyncio.wait_for(func(*args, **kwargs), timeout=20)
 
 # -----------------------
-# PikPak client (with refresh + relogin)
+# PikPak client (with device headers + refresh + relogin)
 # -----------------------
 client = None
 
@@ -80,19 +81,28 @@ async def get_client():
     if not EMAIL or not PASSWORD:
         raise Exception("PIKPAK_EMAIL or PIKPAK_PASSWORD is missing")
 
-    # First time login
+    def new_client():
+        device_id = str(uuid.uuid4())
+        return PikPakApi(
+            email=EMAIL,
+            password=PASSWORD,
+            device_id=device_id,
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        )
+
+    # First login
     if client is None:
-        print("Logging into PikPak...")
-        client = PikPakApi(EMAIL, PASSWORD)
+        print("Logging in to PikPak...")
+        client = new_client()
         await client.login()
         return client
 
-    # Try refresh token
+    # Refresh token
     try:
         await client.refresh_access_token()
     except Exception as e:
-        print("Refresh token failed, re-logging:", e)
-        client = PikPakApi(EMAIL, PASSWORD)
+        print("Refresh failed, re-login:", e)
+        client = new_client()
         await client.login()
 
     return client
@@ -130,9 +140,9 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.2.1",
+        "version": "1.3.0",
         "name": "PikPak Cloud",
-        "description": "Browse and stream files from your PikPak cloud (with Redis caching + token refresh)",
+        "description": "Browse and stream files from your PikPak cloud (Redis cache + token refresh + device auth)",
         "types": ["movie"],
         "resources": ["stream", "catalog"],
         "catalogs": [
