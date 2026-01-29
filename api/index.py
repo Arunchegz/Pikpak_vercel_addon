@@ -2,13 +2,28 @@ from fastapi import FastAPI
 import os
 import re
 import requests
+import time
+from upstash_redis import Redis
 
 app = FastAPI()
 
+# ---------------- CONFIG ----------------
+
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
+
+PIKPAK_EMAIL = os.environ.get("PIKPAK_EMAIL")
+PIKPAK_PASSWORD = os.environ.get("PIKPAK_PASSWORD")
+
+UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL")
+UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+
+# Init Upstash Redis
+redis = Redis(url=UPSTASH_URL, token=UPSTASH_TOKEN)
 
 client = None
 
+
+# ---------------- HELPERS ----------------
 
 def normalize(text: str) -> str:
     text = text.lower()
@@ -17,9 +32,6 @@ def normalize(text: str) -> str:
 
 
 def get_movie_info(imdb_id: str):
-    """
-    Get movie title and year from Stremio Cinemeta.
-    """
     url = f"https://v3-cinemeta.strem.io/meta/movie/{imdb_id}.json"
     r = requests.get(url, timeout=10)
     data = r.json()
@@ -31,31 +43,18 @@ def get_movie_info(imdb_id: str):
 
 async def get_client():
     global client
-    try:
-        from pikpakapi import PikPakApi
-    except Exception as e:
-        raise Exception(f"Failed to import pikpakapi: {e}")
+    from pikpakapi import PikPakApi
 
-    EMAIL = os.environ.get("PIKPAK_EMAIL")
-    PASSWORD = os.environ.get("PIKPAK_PASSWORD")
-
-    if not EMAIL or not PASSWORD:
-        raise Exception("PIKPAK_EMAIL or PIKPAK_PASSWORD is missing")
+    if not PIKPAK_EMAIL or not PIKPAK_PASSWORD:
+        raise Exception("PIKPAK_EMAIL or PIKPAK_PASSWORD missing")
 
     if client is None:
-        try:
-            client = PikPakApi(EMAIL, PASSWORD)
-            await client.login()
-        except Exception as e:
-            raise Exception(f"PikPak login failed: {e}")
-
+        client = PikPakApi(PIKPAK_EMAIL, PIKPAK_PASSWORD)
+        await client.login()
     return client
 
 
 async def collect_files(pk, parent_id="", result=None):
-    """
-    Recursively collect all files from PikPak cloud.
-    """
     if result is None:
         result = []
 
@@ -70,6 +69,25 @@ async def collect_files(pk, parent_id="", result=None):
 
     return result
 
+
+# ---------------- CACHE (UPSTASH) ----------------
+
+def get_cached_url(file_id):
+    try:
+        return redis.get(f"pikpak:{file_id}")
+    except:
+        return None
+
+
+def set_cached_url(file_id, url, expires_at):
+    try:
+        ttl = max(60, expires_at - int(time.time()))
+        redis.set(f"pikpak:{file_id}", url, ex=ttl)
+    except:
+        pass
+
+
+# ---------------- ROUTES ----------------
 
 @app.get("/")
 async def root():
@@ -95,41 +113,28 @@ async def manifest():
 
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
-    # Only handle movies for now
     if type != "movie":
         return {"streams": []}
 
-    # Get movie info from Cinemeta
+    # 1. Get movie info
     try:
         movie_title, movie_year = get_movie_info(id)
     except Exception as e:
-        return {
-            "streams": [],
-            "error": "Failed to fetch movie metadata",
-            "detail": str(e)
-        }
+        return {"streams": [], "error": "Cinemeta failed", "detail": str(e)}
 
     movie_title_n = normalize(movie_title)
 
-    # Init PikPak client
+    # 2. Init PikPak
     try:
         pk = await get_client()
     except Exception as e:
-        return {
-            "streams": [],
-            "error": "Client init failed",
-            "detail": str(e)
-        }
+        return {"streams": [], "error": "PikPak login failed", "detail": str(e)}
 
-    # Collect all files from PikPak
+    # 3. Collect PikPak files
     try:
-        all_files = await collect_files(pk, parent_id="")
+        all_files = await collect_files(pk)
     except Exception as e:
-        return {
-            "streams": [],
-            "error": "File traversal failed",
-            "detail": str(e)
-        }
+        return {"streams": [], "error": "File traversal failed", "detail": str(e)}
 
     streams = []
 
@@ -141,43 +146,48 @@ async def stream(type: str, id: str):
             if not name or not file_id:
                 continue
 
-            # Only video files
             if not name.lower().endswith(VIDEO_EXT):
                 continue
 
             file_n = normalize(name)
 
-            # Must contain movie title
+            # Match movie title
             if movie_title_n not in file_n:
                 continue
 
-            # If year exists, match year too
+            # Match year if available
             if movie_year and movie_year not in file_n:
                 continue
 
-            # Ask PikPak to generate download link
-            try:
+            # 4. Try cache first
+            cached_url = get_cached_url(file_id)
+            if cached_url:
+                url = cached_url
+            else:
+                # 5. Generate new URL from PikPak
                 data = await pk.get_download_url(file_id)
-            except Exception as e:
-                print("get_download_url failed for", name, ":", e)
-                continue
 
-            url = None
+                url = None
+                expires_at = int(time.time()) + 3600  # default 1 hour
 
-            # Primary: links → application/octet-stream → url
-            links = data.get("links", {})
-            if "application/octet-stream" in links:
-                url = links["application/octet-stream"].get("url")
+                links = data.get("links", {})
+                if "application/octet-stream" in links:
+                    link_data = links["application/octet-stream"]
+                    url = link_data.get("url")
+                    expires_at = int(time.time()) + 3600
 
-            # Fallback: medias → first → link → url
-            if not url:
-                medias = data.get("medias", [])
-                if medias:
-                    url = medias[0].get("link", {}).get("url")
+                if not url:
+                    medias = data.get("medias", [])
+                    if medias:
+                        link = medias[0].get("link", {})
+                        url = link.get("url")
+                        expires_at = int(time.time()) + 3600
 
-            if not url:
-                print("No playable URL found for:", name)
-                continue
+                if not url:
+                    continue
+
+                # 6. Save to Upstash
+                set_cached_url(file_id, url, expires_at)
 
             streams.append({
                 "name": "PikPak",
@@ -186,7 +196,7 @@ async def stream(type: str, id: str):
             })
 
         except Exception as e:
-            print("File processing error:", e)
+            print("File error:", e)
             continue
 
     return {
