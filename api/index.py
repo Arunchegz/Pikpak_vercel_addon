@@ -168,7 +168,7 @@ async def stream(type: str, id: str):
                 data = await pk.get_download_url(file_id)
 
                 url = None
-                expires_at = int(time.time()) + 3600  # default 1 hour
+                expires_at = int(time.time()) + 86400  # default 24 hour
 
                 links = data.get("links", {})
                 if "application/octet-stream" in links:
