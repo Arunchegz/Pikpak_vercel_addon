@@ -1,58 +1,25 @@
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 import os
 import re
 import requests
-from upstash_redis import Redis
 
 app = FastAPI()
 
-# -----------------------
-# CORS (needed for Stremio)
-# -----------------------
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# -----------------------
-# Constants
-# -----------------------
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
-CACHE_TTL = 60 * 60 * 24  # 24 hours
 
-# -----------------------
-# Upstash Redis
-# -----------------------
-redis = Redis(
-    url=os.environ.get("UPSTASH_REDIS_REST_URL"),
-    token=os.environ.get("UPSTASH_REDIS_REST_TOKEN"),
-)
+client = None
 
-def get_cached_url(file_id: str):
-    try:
-        return redis.get(f"pikpak:{file_id}")
-    except:
-        return None
 
-def set_cached_url(file_id: str, url: str):
-    try:
-        redis.set(f"pikpak:{file_id}", url, ex=CACHE_TTL)
-    except:
-        pass
-
-# -----------------------
-# Utils
-# -----------------------
 def normalize(text: str) -> str:
     text = text.lower()
-    text = re.sub(r"[^a-z0-9 ]", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r'[^a-z0-9 ]', ' ', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
 
 def get_movie_info(imdb_id: str):
+    """
+    Get movie title and year from Stremio Cinemeta.
+    """
     url = f"https://v3-cinemeta.strem.io/meta/movie/{imdb_id}.json"
     r = requests.get(url, timeout=10)
     data = r.json()
@@ -61,14 +28,13 @@ def get_movie_info(imdb_id: str):
     year = str(meta.get("year", ""))
     return title, year
 
-# -----------------------
-# PikPak client
-# -----------------------
-client = None
 
 async def get_client():
     global client
-    from pikpakapi import PikPakApi
+    try:
+        from pikpakapi import PikPakApi
+    except Exception as e:
+        raise Exception(f"Failed to import pikpakapi: {e}")
 
     EMAIL = os.environ.get("PIKPAK_EMAIL")
     PASSWORD = os.environ.get("PIKPAK_PASSWORD")
@@ -77,12 +43,19 @@ async def get_client():
         raise Exception("PIKPAK_EMAIL or PIKPAK_PASSWORD is missing")
 
     if client is None:
-        client = PikPakApi(EMAIL, PASSWORD)
-        await client.login()
+        try:
+            client = PikPakApi(EMAIL, PASSWORD)
+            await client.login()
+        except Exception as e:
+            raise Exception(f"PikPak login failed: {e}")
 
     return client
 
+
 async def collect_files(pk, parent_id="", result=None):
+    """
+    Recursively collect all files from PikPak cloud.
+    """
     if result is None:
         result = []
 
@@ -97,130 +70,66 @@ async def collect_files(pk, parent_id="", result=None):
 
     return result
 
-# -----------------------
-# Routes
-# -----------------------
+
 @app.get("/")
 async def root():
     return {
         "status": "ok",
-        "addon": "PikPak Stremio Addon",
+        "message": "PikPak Stremio addon running",
         "manifest": "/manifest.json"
     }
 
-# -----------------------
-# Manifest with Catalog
-# -----------------------
+
 @app.get("/manifest.json")
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.2.0",
+        "version": "1.0.0",
         "name": "PikPak Cloud",
-        "description": "Browse and stream files from your PikPak cloud (with Redis caching)",
-        "types": ["movie"],
-        "resources": ["stream", "catalog"],
-        "catalogs": [
-            {
-                "type": "movie",
-                "id": "pikpak",
-                "name": "My PikPak Files"
-            }
-        ],
-        "idPrefixes": ["tt", "pikpak"]
+        "description": "Stream files from your PikPak cloud",
+        "types": ["movie", "series"],
+        "resources": ["stream"],
+        "idPrefixes": ["tt"]
     }
 
-# -----------------------
-# Catalog (Discover Page)
-# -----------------------
-@app.get("/catalog/{type}/{id}.json")
-async def catalog(type: str, id: str):
-    if type != "movie" or id != "pikpak":
-        return {"metas": []}
 
-    try:
-        pk = await get_client()
-        files = await collect_files(pk)
-    except Exception as e:
-        return {"metas": [], "error": str(e)}
-
-    metas = []
-
-    for f in files:
-        name = f.get("name", "")
-        file_id = f.get("id")
-
-        if not name or not file_id:
-            continue
-
-        if not name.lower().endswith(VIDEO_EXT):
-            continue
-
-        metas.append({
-            "id": f"pikpak:{file_id}",
-            "type": "movie",
-            "name": name,
-            "poster": "https://upload.wikimedia.org/wikipedia/commons/8/8c/PikPak_logo.png"
-        })
-
-    return {"metas": metas}
-
-# -----------------------
-# Stream Endpoint
-# -----------------------
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
-
-    # Case 1: Playing directly from Catalog (My PikPak Files)
-    if id.startswith("pikpak:"):
-        file_id = id.replace("pikpak:", "")
-        pk = await get_client()
-
-        cached = get_cached_url(file_id)
-        if cached:
-            url = cached
-        else:
-            data = await pk.get_download_url(file_id)
-
-            url = None
-            links = data.get("links", {})
-            if "application/octet-stream" in links:
-                url = links["application/octet-stream"].get("url")
-
-            if not url:
-                medias = data.get("medias", [])
-                if medias:
-                    url = medias[0].get("link", {}).get("url")
-
-            if not url:
-                return {"streams": []}
-
-            set_cached_url(file_id, url)
-
-        return {
-            "streams": [{
-                "name": "PikPak",
-                "title": "PikPak Direct Stream",
-                "url": url
-            }]
-        }
-
-    # Case 2: Normal IMDb movie matching
+    # Only handle movies for now
     if type != "movie":
         return {"streams": []}
 
+    # Get movie info from Cinemeta
     try:
         movie_title, movie_year = get_movie_info(id)
     except Exception as e:
-        return {"streams": [], "error": str(e)}
+        return {
+            "streams": [],
+            "error": "Failed to fetch movie metadata",
+            "detail": str(e)
+        }
 
     movie_title_n = normalize(movie_title)
 
+    # Init PikPak client
     try:
         pk = await get_client()
-        all_files = await collect_files(pk)
     except Exception as e:
-        return {"streams": [], "error": str(e)}
+        return {
+            "streams": [],
+            "error": "Client init failed",
+            "detail": str(e)
+        }
+
+    # Collect all files from PikPak
+    try:
+        all_files = await collect_files(pk, parent_id="")
+    except Exception as e:
+        return {
+            "streams": [],
+            "error": "File traversal failed",
+            "detail": str(e)
+        }
 
     streams = []
 
@@ -232,37 +141,43 @@ async def stream(type: str, id: str):
             if not name or not file_id:
                 continue
 
+            # Only video files
             if not name.lower().endswith(VIDEO_EXT):
                 continue
 
             file_n = normalize(name)
 
+            # Must contain movie title
             if movie_title_n not in file_n:
                 continue
 
+            # If year exists, match year too
             if movie_year and movie_year not in file_n:
                 continue
 
-            cached = get_cached_url(file_id)
-            if cached:
-                url = cached
-            else:
+            # Ask PikPak to generate download link
+            try:
                 data = await pk.get_download_url(file_id)
+            except Exception as e:
+                print("get_download_url failed for", name, ":", e)
+                continue
 
-                url = None
-                links = data.get("links", {})
-                if "application/octet-stream" in links:
-                    url = links["application/octet-stream"].get("url")
+            url = None
 
-                if not url:
-                    medias = data.get("medias", [])
-                    if medias:
-                        url = medias[0].get("link", {}).get("url")
+            # Primary: links → application/octet-stream → url
+            links = data.get("links", {})
+            if "application/octet-stream" in links:
+                url = links["application/octet-stream"].get("url")
 
-                if not url:
-                    continue
+            # Fallback: medias → first → link → url
+            if not url:
+                medias = data.get("medias", [])
+                if medias:
+                    url = medias[0].get("link", {}).get("url")
 
-                set_cached_url(file_id, url)
+            if not url:
+                print("No playable URL found for:", name)
+                continue
 
             streams.append({
                 "name": "PikPak",
@@ -271,7 +186,9 @@ async def stream(type: str, id: str):
             })
 
         except Exception as e:
-            print("Error processing file:", e)
+            print("File processing error:", e)
             continue
 
-    return {"streams": streams}
+    return {
+        "streams": streams
+    }
