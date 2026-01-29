@@ -8,8 +8,9 @@ VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
 client = None
 
 
-def get_client():
+async def get_client():
     global client
+
     try:
         from pikpakapi import PikPakApi
     except Exception as e:
@@ -24,7 +25,7 @@ def get_client():
     if client is None:
         try:
             client = PikPakApi(EMAIL, PASSWORD)
-            client.login()
+            await client.login()   # <-- IMPORTANT: await
         except Exception as e:
             raise Exception(f"PikPak login failed: {e}")
 
@@ -32,7 +33,7 @@ def get_client():
 
 
 @app.get("/")
-def root():
+async def root():
     return {
         "status": "ok",
         "message": "PikPak Stremio addon running",
@@ -41,7 +42,7 @@ def root():
 
 
 @app.get("/manifest.json")
-def manifest():
+async def manifest():
     return {
         "id": "com.arun.pikpak",
         "version": "1.0.0",
@@ -54,9 +55,10 @@ def manifest():
 
 
 @app.get("/stream/{type}/{id}.json")
-def stream(type: str, id: str):
+async def stream(type: str, id: str):
+    # Step 1: Init client
     try:
-        pk = get_client()
+        pk = await get_client()
     except Exception as e:
         return {
             "streams": [],
@@ -64,8 +66,9 @@ def stream(type: str, id: str):
             "detail": str(e)
         }
 
+    # Step 2: List files
     try:
-        data = pk.file_list(parent_id="")
+        data = await pk.file_list(parent_id="")   # <-- await
     except Exception as e:
         return {
             "streams": [],
@@ -76,6 +79,7 @@ def stream(type: str, id: str):
     files = data.get("files", [])
     streams = []
 
+    # Step 3: Build streams
     for f in files:
         try:
             name = f.get("name", "")
@@ -88,7 +92,7 @@ def stream(type: str, id: str):
                 continue
 
             try:
-                url = pk.get_download_url(file_id)
+                url = await pk.get_download_url(file_id)   # <-- await
             except Exception as e:
                 print("Download URL failed:", e)
                 continue
@@ -98,8 +102,9 @@ def stream(type: str, id: str):
                 "title": name,
                 "url": url
             })
+
         except Exception as e:
-            print("File error:", e)
+            print("File processing error:", e)
             continue
 
     return {"streams": streams}
