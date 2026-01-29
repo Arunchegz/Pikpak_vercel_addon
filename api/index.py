@@ -7,9 +7,9 @@ from upstash_redis import Redis
 
 app = FastAPI()
 
-# ===============================
-# Upstash Redis Init
-# ===============================
+# ==================================================
+# Upstash Redis
+# ==================================================
 redis = Redis(
     url=os.environ.get("UPSTASH_REDIS_REST_URL"),
     token=os.environ.get("UPSTASH_REDIS_REST_TOKEN")
@@ -32,9 +32,9 @@ def set_cached_url(file_id: str, url: str):
         pass
 
 
-# ===============================
-# PikPak Client
-# ===============================
+# ==================================================
+# PikPak Client Helper
+# ==================================================
 def get_pikpak():
     email = os.environ.get("PIKPAK_EMAIL")
     password = os.environ.get("PIKPAK_PASSWORD")
@@ -42,17 +42,18 @@ def get_pikpak():
     if not email or not password:
         raise Exception("PIKPAK_EMAIL and PIKPAK_PASSWORD must be set")
 
-    return PikPakApi(email=email, password=password)
+    client = PikPakApi()
+    return client, email, password
 
 
-# ===============================
+# ==================================================
 # Manifest
-# ===============================
+# ==================================================
 @app.get("/manifest.json")
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.2.0",
+        "version": "1.2.1",
         "name": "PikPak Cloud",
         "description": "Browse and stream your PikPak cloud inside Stremio",
         "types": ["movie"],
@@ -68,16 +69,16 @@ async def manifest():
     }
 
 
-# ===============================
+# ==================================================
 # Catalog Endpoint
-# ===============================
+# ==================================================
 @app.get("/catalog/{type}/{id}.json")
 async def catalog(type: str, id: str):
     if id != "pikpak":
         return {"metas": []}
 
-    pk = get_pikpak()
-    await pk.login()
+    pk, email, password = get_pikpak()
+    await pk.login(email, password)
 
     files = await pk.get_file_list(parent_id="")
 
@@ -96,30 +97,29 @@ async def catalog(type: str, id: str):
     return {"metas": metas}
 
 
-# ===============================
+# ==================================================
 # Stream Endpoint
-# ===============================
+# ==================================================
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
     """
-    id here is the PikPak file ID coming from catalog
+    id is the PikPak file ID coming from the catalog
     """
 
-    pk = get_pikpak()
-    await pk.login()
+    pk, email, password = get_pikpak()
+    await pk.login(email, password)
 
     file_id = id
 
-    # 1. Try cache
+    # 1. Try Redis cache
     cached = get_cached_url(file_id)
     if cached:
         url = cached
     else:
-        # 2. Generate from PikPak
+        # 2. Generate new download URL from PikPak
         data = await pk.get_download_url(file_id)
 
         url = None
-
         links = data.get("links", {})
         if "application/octet-stream" in links:
             url = links["application/octet-stream"].get("url")
@@ -132,23 +132,23 @@ async def stream(type: str, id: str):
         if not url:
             return {"streams": []}
 
-        # 3. Save to Redis (24 hours)
+        # 3. Cache in Redis for 24 hours
         set_cached_url(file_id, url)
 
-    streams = [
-        {
-            "name": "PikPak",
-            "title": "Play from PikPak",
-            "url": url
-        }
-    ]
+    return JSONResponse({
+        "streams": [
+            {
+                "name": "PikPak",
+                "title": "Play from PikPak",
+                "url": url
+            }
+        ]
+    })
 
-    return JSONResponse({"streams": streams})
 
-
-# ===============================
-# Root
-# ===============================
+# ==================================================
+# Root Endpoint
+# ==================================================
 @app.get("/")
 async def root():
     return {
