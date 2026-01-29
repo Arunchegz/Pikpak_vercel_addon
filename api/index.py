@@ -23,12 +23,9 @@ app.add_middleware(
 # -----------------------
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
 
-# Stream URL cache
-CACHE_TTL = 60 * 60 * 24  # 24 hours
-
-# File list cache
+CACHE_TTL = 60 * 60 * 24        # Stream URL cache: 24h
 FILES_CACHE_KEY = "pikpak:filelist"
-FILES_CACHE_TTL = 60 * 60 * 24  # 24 hours
+FILES_CACHE_TTL = 60 * 60 * 24  # File list cache: 24h
 
 # -----------------------
 # Redis
@@ -38,13 +35,13 @@ redis = Redis(
     token=os.environ.get("UPSTASH_REDIS_REST_TOKEN"),
 )
 
-def get_cached_url(file_id: str):
+def get_cached_url(file_id):
     try:
         return redis.get(f"pikpak:url:{file_id}")
     except:
         return None
 
-def set_cached_url(file_id: str, url: str):
+def set_cached_url(file_id, url):
     try:
         redis.set(f"pikpak:url:{file_id}", url, ex=CACHE_TTL)
     except:
@@ -75,9 +72,7 @@ def get_movie_info(imdb_id: str):
     r = requests.get(url, timeout=10)
     data = r.json()
     meta = data.get("meta", {})
-    title = meta.get("name", "")
-    year = str(meta.get("year", ""))
-    return title, year
+    return meta.get("name", ""), str(meta.get("year", ""))
 
 # -----------------------
 # PikPak Client
@@ -92,7 +87,7 @@ async def get_client():
     PASSWORD = os.environ.get("PIKPAK_PASSWORD")
 
     if not EMAIL or not PASSWORD:
-        raise Exception("PIKPAK_EMAIL or PIKPAK_PASSWORD is missing")
+        raise Exception("Missing PikPak credentials")
 
     if client is None:
         client = PikPakApi(EMAIL, PASSWORD)
@@ -139,9 +134,9 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.5.0",
+        "version": "1.5.1",
         "name": "PikPak Cloud",
-        "description": "Browse and stream files from your PikPak cloud with Redis caching",
+        "description": "Browse and stream files from your PikPak cloud",
         "types": ["movie"],
         "resources": ["stream", "catalog"],
         "catalogs": [
@@ -165,22 +160,18 @@ async def catalog(type: str, id: str):
     pk = await get_client()
     files = await get_files_with_auto_refresh(pk)
 
-    if not files:
-        files = await collect_files(pk)
-        set_cached_files(files)
-
     metas = []
     for f in files:
         name = f.get("name", "")
-        file_id = f.get("id")
+        fid = f.get("id")
 
-        if not name or not file_id:
+        if not name or not fid:
             continue
         if not name.lower().endswith(VIDEO_EXT):
             continue
 
         metas.append({
-            "id": f"pikpak:{file_id}",
+            "id": f"pikpak:{fid}",
             "type": "movie",
             "name": name,
             "poster": "https://upload.wikimedia.org/wikipedia/commons/8/8c/PikPak_logo.png"
@@ -194,10 +185,11 @@ async def catalog(type: str, id: str):
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
 
+    pk = await get_client()
+
     # Direct play from catalog
     if id.startswith("pikpak:"):
         file_id = id.replace("pikpak:", "")
-        pk = await get_client()
 
         cached = get_cached_url(file_id)
         if cached:
@@ -220,13 +212,11 @@ async def stream(type: str, id: str):
 
             set_cached_url(file_id, url)
 
-        return {
-            "streams": [{
-                "name": "PikPak",
-                "title": "PikPak Direct Stream",
-                "url": url
-            }]
-        }
+        return {"streams": [{
+            "name": "PikPak",
+            "title": "PikPak Direct Stream",
+            "url": url
+        }]}
 
     # IMDb movie matching
     if type != "movie":
@@ -235,31 +225,30 @@ async def stream(type: str, id: str):
     movie_title, movie_year = get_movie_info(id)
     movie_title_n = normalize(movie_title)
 
-    pk = await get_client()
-    all_files = await get_files_with_auto_refresh(pk)
+    files = await get_files_with_auto_refresh(pk)
 
-    async def build_streams(files):
-        result = []
-        for f in files:
+    async def build_streams(file_list):
+        streams = []
+        for f in file_list:
             name = f.get("name", "")
-            file_id = f.get("id")
+            fid = f.get("id")
 
-            if not name or not file_id:
+            if not name or not fid:
                 continue
             if not name.lower().endswith(VIDEO_EXT):
                 continue
 
-            file_n = normalize(name)
-            if movie_title_n not in file_n:
+            fn = normalize(name)
+            if movie_title_n not in fn:
                 continue
-            if movie_year and movie_year not in file_n:
+            if movie_year and movie_year not in fn:
                 continue
 
-            cached = get_cached_url(file_id)
+            cached = get_cached_url(fid)
             if cached:
                 url = cached
             else:
-                data = await pk.get_download_url(file_id)
+                data = await pk.get_download_url(fid)
                 url = None
 
                 links = data.get("links", {})
@@ -274,19 +263,19 @@ async def stream(type: str, id: str):
                 if not url:
                     continue
 
-                set_cached_url(file_id, url)
+                set_cached_url(fid, url)
 
-            result.append({
+            streams.append({
                 "name": "PikPak",
                 "title": name,
                 "url": url
             })
-        return result
+        return streams
 
-    # First try cached list
-    streams = await build_streams(all_files)
+    # First try cache
+    streams = await build_streams(files)
 
-    # If nothing found, refresh file list and retry
+    # If nothing found → force refresh
     if not streams:
         fresh_files = await collect_files(pk)
         set_cached_files(fresh_files)
