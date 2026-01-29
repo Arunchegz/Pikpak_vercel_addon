@@ -3,12 +3,17 @@ import os
 
 app = FastAPI()
 
+# Video file extensions we accept
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
 
+# Global client (Vercel may reuse warm instance)
 client = None
 
 
 async def get_client():
+    """
+    Create and login PikPak client once.
+    """
     global client
     try:
         from pikpakapi import PikPakApi
@@ -33,7 +38,7 @@ async def get_client():
 
 async def collect_files(pk, parent_id="", result=None):
     """
-    Recursively collect all files from PikPak cloud.
+    Recursively walk through all folders in PikPak and collect every file.
     """
     if result is None:
         result = []
@@ -97,7 +102,7 @@ async def stream(type: str, id: str):
 
     streams = []
 
-    # Step 3: Build streams list
+    # Step 3: Build Stremio streams
     for f in all_files:
         try:
             name = f.get("name", "")
@@ -109,10 +114,23 @@ async def stream(type: str, id: str):
             if not name.lower().endswith(VIDEO_EXT):
                 continue
 
-            try:
-                url = await pk.get_download_url(file_id)
-            except Exception as e:
-                print("Download URL failed for", name, ":", e)
+            # Extract the real playable URL
+            url = None
+
+            # Method 1: Direct link in links
+            links = f.get("links", {})
+            if "application/octet-stream" in links:
+                url = links["application/octet-stream"].get("url")
+
+            # Method 2: Media stream link
+            if not url:
+                medias = f.get("medias", [])
+                if medias:
+                    link = medias[0].get("link", {})
+                    url = link.get("url")
+
+            if not url:
+                print("No playable URL found for:", name)
                 continue
 
             streams.append({
