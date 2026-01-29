@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 import os
-from pikpakapi.pikpak import PikPakApi
+from pikpak import PikPak
 
 app = FastAPI()
 
@@ -8,14 +8,12 @@ EMAIL = os.environ.get("PIKPAK_EMAIL")
 PASSWORD = os.environ.get("PIKPAK_PASSWORD")
 
 client = None
-
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm")
-
 
 def get_client():
     global client
     if client is None:
-        client = PikPakApi(EMAIL, PASSWORD)
+        client = PikPak(EMAIL, PASSWORD)
         client.login()
     return client
 
@@ -37,23 +35,23 @@ def manifest():
 def stream(type: str, id: str):
     pk = get_client()
 
-    # In Quan666 API, root listing is usually:
-    files = pk.file_list(parent_id="")
+    # Root file listing
+    data = pk.file_list(parent_id="")
+    files = data.get("files", [])
 
     streams = []
 
-    for f in files.get("files", []):
+    for f in files:
         name = f["name"].lower()
         if not name.endswith(VIDEO_EXT):
             continue
 
-        # Download URL call
-        link = pk.get_download_url(f["id"])
+        url = pk.get_download_url(f["id"])
 
         streams.append({
             "name": "PikPak",
             "title": f["name"],
-            "url": link
+            "url": url
         })
 
     return {"streams": streams}
