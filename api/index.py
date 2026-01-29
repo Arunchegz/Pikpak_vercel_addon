@@ -3,17 +3,12 @@ import os
 
 app = FastAPI()
 
-# Video file extensions we accept
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
 
-# Global client (Vercel may reuse warm instance)
 client = None
 
 
 async def get_client():
-    """
-    Create and login PikPak client once.
-    """
     global client
     try:
         from pikpakapi import PikPakApi
@@ -38,7 +33,7 @@ async def get_client():
 
 async def collect_files(pk, parent_id="", result=None):
     """
-    Recursively walk through all folders in PikPak and collect every file.
+    Recursively collect all files from PikPak cloud.
     """
     if result is None:
         result = []
@@ -47,7 +42,6 @@ async def collect_files(pk, parent_id="", result=None):
     files = data.get("files", [])
 
     for f in files:
-        # Folder
         if f.get("kind") == "drive#folder":
             await collect_files(pk, f["id"], result)
         else:
@@ -90,7 +84,7 @@ async def stream(type: str, id: str):
             "detail": str(e)
         }
 
-    # Step 2: Recursively get all files
+    # Step 2: Recursively collect all files
     try:
         all_files = await collect_files(pk, parent_id="")
     except Exception as e:
@@ -102,7 +96,7 @@ async def stream(type: str, id: str):
 
     streams = []
 
-    # Step 3: Build Stremio streams
+    # Step 3: For each video file, request a download URL and extract the real link
     for f in all_files:
         try:
             name = f.get("name", "")
@@ -114,17 +108,23 @@ async def stream(type: str, id: str):
             if not name.lower().endswith(VIDEO_EXT):
                 continue
 
-            # Extract the real playable URL
+            # Call PikPak API to generate download URL
+            try:
+                data = await pk.get_download_url(file_id)
+            except Exception as e:
+                print("get_download_url failed for", name, ":", e)
+                continue
+
             url = None
 
-            # Method 1: Direct link in links
-            links = f.get("links", {})
+            # Primary: links → application/octet-stream → url
+            links = data.get("links", {})
             if "application/octet-stream" in links:
                 url = links["application/octet-stream"].get("url")
 
-            # Method 2: Media stream link
+            # Fallback: medias → first → link → url
             if not url:
-                medias = f.get("medias", [])
+                medias = data.get("medias", [])
                 if medias:
                     link = medias[0].get("link", {})
                     url = link.get("url")
