@@ -10,7 +10,6 @@ client = None
 
 async def get_client():
     global client
-
     try:
         from pikpakapi import PikPakApi
     except Exception as e:
@@ -25,11 +24,31 @@ async def get_client():
     if client is None:
         try:
             client = PikPakApi(EMAIL, PASSWORD)
-            await client.login()   # <-- IMPORTANT: await
+            await client.login()
         except Exception as e:
             raise Exception(f"PikPak login failed: {e}")
 
     return client
+
+
+async def collect_files(pk, parent_id="", result=None):
+    """
+    Recursively collect all files from PikPak cloud.
+    """
+    if result is None:
+        result = []
+
+    data = await pk.file_list(parent_id=parent_id)
+    files = data.get("files", [])
+
+    for f in files:
+        # Folder
+        if f.get("kind") == "drive#folder":
+            await collect_files(pk, f["id"], result)
+        else:
+            result.append(f)
+
+    return result
 
 
 @app.get("/")
@@ -66,21 +85,20 @@ async def stream(type: str, id: str):
             "detail": str(e)
         }
 
-    # Step 2: List files
+    # Step 2: Recursively get all files
     try:
-        data = await pk.file_list(parent_id="")   # <-- await
+        all_files = await collect_files(pk, parent_id="")
     except Exception as e:
         return {
             "streams": [],
-            "error": "file_list failed",
+            "error": "File traversal failed",
             "detail": str(e)
         }
 
-    files = data.get("files", [])
     streams = []
 
-    # Step 3: Build streams
-    for f in files:
+    # Step 3: Build streams list
+    for f in all_files:
         try:
             name = f.get("name", "")
             file_id = f.get("id")
@@ -92,9 +110,9 @@ async def stream(type: str, id: str):
                 continue
 
             try:
-                url = await pk.get_download_url(file_id)   # <-- await
+                url = await pk.get_download_url(file_id)
             except Exception as e:
-                print("Download URL failed:", e)
+                print("Download URL failed for", name, ":", e)
                 continue
 
             streams.append({
@@ -107,4 +125,6 @@ async def stream(type: str, id: str):
             print("File processing error:", e)
             continue
 
-    return {"streams": streams}
+    return {
+        "streams": streams
+    }
