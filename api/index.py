@@ -7,129 +7,152 @@ from upstash_redis import Redis
 
 app = FastAPI()
 
-# -------------------------------
-# Upstash Redis init
-# -------------------------------
+# ===============================
+# Upstash Redis Init
+# ===============================
 redis = Redis(
     url=os.environ.get("UPSTASH_REDIS_REST_URL"),
     token=os.environ.get("UPSTASH_REDIS_REST_TOKEN")
 )
 
-# Cache TTL: 24 hours
-CACHE_TTL = 60 * 60 * 24  # 86400 seconds
+CACHE_TTL = 60 * 60 * 24  # 24 hours
 
 
 def get_cached_url(file_id: str):
     try:
         return redis.get(f"pikpak:{file_id}")
-    except Exception:
+    except:
         return None
 
 
 def set_cached_url(file_id: str, url: str):
     try:
         redis.set(f"pikpak:{file_id}", url, ex=CACHE_TTL)
-    except Exception:
+    except:
         pass
 
 
-# -------------------------------
-# PikPak client
-# -------------------------------
+# ===============================
+# PikPak Client
+# ===============================
 def get_pikpak():
     email = os.environ.get("PIKPAK_EMAIL")
     password = os.environ.get("PIKPAK_PASSWORD")
 
     if not email or not password:
-        raise Exception("PIKPAK_EMAIL or PIKPAK_PASSWORD not set")
+        raise Exception("PIKPAK_EMAIL and PIKPAK_PASSWORD must be set")
 
-    client = PikPakApi(email=email, password=password)
-    return client
+    return PikPakApi(email=email, password=password)
 
 
-# -------------------------------
-# Stremio manifest
-# -------------------------------
+# ===============================
+# Manifest
+# ===============================
 @app.get("/manifest.json")
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.0.0",
+        "version": "1.2.0",
         "name": "PikPak Cloud",
-        "description": "Stream files from your PikPak cloud",
-        "types": ["movie", "series"],
-        "resources": ["stream"],
-        "idPrefixes": ["tt"]
+        "description": "Browse and stream your PikPak cloud inside Stremio",
+        "types": ["movie"],
+        "resources": ["stream", "catalog"],
+        "catalogs": [
+            {
+                "type": "movie",
+                "id": "pikpak",
+                "name": "My PikPak Files"
+            }
+        ],
+        "idPrefixes": []
     }
 
 
-# -------------------------------
-# Stream endpoint
-# -------------------------------
+# ===============================
+# Catalog Endpoint
+# ===============================
+@app.get("/catalog/{type}/{id}.json")
+async def catalog(type: str, id: str):
+    if id != "pikpak":
+        return {"metas": []}
+
+    pk = get_pikpak()
+    await pk.login()
+
+    files = await pk.get_file_list(parent_id="")
+
+    metas = []
+    for f in files:
+        if f.get("file_category") != "VIDEO":
+            continue
+
+        metas.append({
+            "id": f["id"],  # PikPak file ID
+            "type": "movie",
+            "name": f["name"],
+            "poster": f.get("icon_link") or "https://static.mypikpak.com/39998a187e280e2ee9ceb5f58315a1bcc744fa64",
+        })
+
+    return {"metas": metas}
+
+
+# ===============================
+# Stream Endpoint
+# ===============================
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
     """
-    Shows all video files in PikPak for now.
-    (You already filtered by specific movie earlier, keep your filter if needed)
+    id here is the PikPak file ID coming from catalog
     """
 
     pk = get_pikpak()
     await pk.login()
 
-    # Get all files from root
-    files = await pk.get_file_list(parent_id="")
+    file_id = id
 
-    streams = []
+    # 1. Try cache
+    cached = get_cached_url(file_id)
+    if cached:
+        url = cached
+    else:
+        # 2. Generate from PikPak
+        data = await pk.get_download_url(file_id)
 
-    for f in files:
-        if f.get("file_category") != "VIDEO":
-            continue
+        url = None
 
-        file_id = f["id"]
-        title = f["name"]
+        links = data.get("links", {})
+        if "application/octet-stream" in links:
+            url = links["application/octet-stream"].get("url")
 
-        # 1. Try Redis cache
-        cached = get_cached_url(file_id)
-        if cached:
-            url = cached
-        else:
-            # 2. Generate new URL from PikPak
-            data = await pk.get_download_url(file_id)
+        if not url:
+            medias = data.get("medias", [])
+            if medias:
+                url = medias[0].get("link", {}).get("url")
 
-            url = None
+        if not url:
+            return {"streams": []}
 
-            links = data.get("links", {})
-            if "application/octet-stream" in links:
-                url = links["application/octet-stream"].get("url")
+        # 3. Save to Redis (24 hours)
+        set_cached_url(file_id, url)
 
-            if not url:
-                medias = data.get("medias", [])
-                if medias:
-                    link = medias[0].get("link", {})
-                    url = link.get("url")
-
-            if not url:
-                continue
-
-            # 3. Save to Redis for 24 hours
-            set_cached_url(file_id, url)
-
-        streams.append({
+    streams = [
+        {
             "name": "PikPak",
-            "title": title,
+            "title": "Play from PikPak",
             "url": url
-        })
+        }
+    ]
 
     return JSONResponse({"streams": streams})
 
 
-# -------------------------------
-# Root check
-# -------------------------------
+# ===============================
+# Root
+# ===============================
 @app.get("/")
 async def root():
     return {
         "status": "ok",
-        "cache": "Upstash Redis (24h TTL)",
-        "addon": "PikPak Stremio"
+        "addon": "PikPak Cloud",
+        "cache": "Upstash Redis (24h TTL)"
     }
