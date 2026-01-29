@@ -62,7 +62,7 @@ def get_movie_info(imdb_id: str):
     return title, year
 
 # -----------------------
-# PikPak client
+# PikPak client (auto relogin on 401)
 # -----------------------
 client = None
 
@@ -76,13 +76,25 @@ async def get_client():
     if not EMAIL or not PASSWORD:
         raise Exception("PIKPAK_EMAIL or PIKPAK_PASSWORD is missing")
 
+    # First login
     if client is None:
+        client = PikPakApi(EMAIL, PASSWORD)
+        await client.login()
+        return client
+
+    # Check token validity
+    try:
+        await client.file_list(parent_id="root", limit=1)
+    except Exception:
+        # Session expired → re-login
         client = PikPakApi(EMAIL, PASSWORD)
         await client.login()
 
     return client
 
-# ROOT FIX: use "root" instead of ""
+# -----------------------
+# Collect files (ROOT FIX)
+# -----------------------
 async def collect_files(pk, parent_id="root", result=None):
     if result is None:
         result = []
@@ -116,7 +128,7 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.2.1",
+        "version": "1.2.2",
         "name": "PikPak Cloud",
         "description": "Browse and stream files from your PikPak cloud",
         "resources": ["catalog", "stream"],
@@ -173,7 +185,7 @@ async def catalog(type: str, id: str):
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
 
-    # Case 1: Playing directly from Catalog
+    # Case 1: Direct play from PikPak catalog
     if id.startswith("pikpak:"):
         file_id = id.replace("pikpak:", "")
         pk = await get_client()
@@ -191,89 +203,3 @@ async def stream(type: str, id: str):
 
             if not url:
                 medias = data.get("medias", [])
-                if medias:
-                    url = medias[0].get("link", {}).get("url")
-
-            if not url:
-                return {"streams": []}
-
-            set_cached_url(file_id, url)
-
-        return {
-            "streams": [{
-                "name": "PikPak",
-                "title": "PikPak Direct Stream",
-                "url": url
-            }]
-        }
-
-    # Case 2: IMDb movie matching (optional)
-    if type != "movie":
-        return {"streams": []}
-
-    try:
-        movie_title, movie_year = get_movie_info(id)
-    except Exception as e:
-        return {"streams": [], "error": str(e)}
-
-    movie_title_n = normalize(movie_title)
-
-    try:
-        pk = await get_client()
-        all_files = await collect_files(pk, "root")
-    except Exception as e:
-        return {"streams": [], "error": str(e)}
-
-    streams = []
-
-    for f in all_files:
-        try:
-            name = f.get("name", "")
-            file_id = f.get("id")
-
-            if not name or not file_id:
-                continue
-
-            if not name.lower().endswith(VIDEO_EXT):
-                continue
-
-            file_n = normalize(name)
-
-            if movie_title_n not in file_n:
-                continue
-
-            if movie_year and movie_year not in file_n:
-                continue
-
-            cached = get_cached_url(file_id)
-            if cached:
-                url = cached
-            else:
-                data = await pk.get_download_url(file_id)
-
-                url = None
-                links = data.get("links", {})
-                if "application/octet-stream" in links:
-                    url = links["application/octet-stream"].get("url")
-
-                if not url:
-                    medias = data.get("medias", [])
-                    if medias:
-                        url = medias[0].get("link", {}).get("url")
-
-                if not url:
-                    continue
-
-                set_cached_url(file_id, url)
-
-            streams.append({
-                "name": "PikPak",
-                "title": name,
-                "url": url
-            })
-
-        except Exception as e:
-            print("Error processing file:", e)
-            continue
-
-    return {"streams": streams}
