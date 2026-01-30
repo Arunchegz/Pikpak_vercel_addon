@@ -1,8 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from upstash_redis import Redis
-import os, re, requests, asyncio, time
-
+import os, re, requests
 from pikpakapi import PikPakApi
 
 app = FastAPI()
@@ -18,7 +17,7 @@ app.add_middleware(
 )
 
 # -----------------------
-# Redis
+# Redis (optional, not required here)
 # -----------------------
 redis = Redis(
     url=os.environ.get("UPSTASH_REDIS_REST_URL"),
@@ -26,22 +25,49 @@ redis = Redis(
 )
 
 # -----------------------
-# Helpers (Seedr-style)
+# Constants
 # -----------------------
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".ts")
 
+JUNK_WORDS = [
+    "1080p", "720p", "2160p", "4k",
+    "hdrip", "webrip", "webdl", "bluray", "brrip",
+    "x264", "x265", "h264", "h265", "hevc",
+    "aac", "dts", "ddp", "atmos",
+    "hindi", "tamil", "telugu", "malayalam",
+    "esub", "sub", "subs", "kbps", "mbps"
+]
+
+# -----------------------
+# Helpers (IMPORTANT FIX)
+# -----------------------
 def normalize(text: str):
     return re.sub(r"[^a-z0-9]", "", text.lower())
 
+
 def extract_title_year(filename: str):
-    year_match = re.search(r"(19|20)\d{2}", filename)
+    name = filename.lower()
+
+    # remove extension
+    name = re.sub(r"\.(mkv|mp4|avi|mov|webm|ts)$", "", name)
+
+    # extract year
+    year_match = re.search(r"(19|20)\d{2}", name)
     year = year_match.group(0) if year_match else ""
 
-    title = re.sub(r"\.(mkv|mp4|avi|mov|webm|ts).*", "", filename, flags=re.I)
-    title = re.sub(r"(19|20)\d{2}", "", title)
-    title = title.replace(".", " ").replace("_", " ").strip()
+    # remove year
+    name = re.sub(r"(19|20)\d{2}", " ", name)
 
-    return title, year
+    # remove junk words
+    for word in JUNK_WORDS:
+        name = name.replace(word, " ")
+
+    # cleanup
+    name = re.sub(r"[^a-z0-9 ]", " ", name)
+    name = re.sub(r"\s+", " ", name).strip()
+
+    return name.title(), year
+
 
 def get_movie_title(imdb_id: str):
     r = requests.get(
@@ -51,8 +77,9 @@ def get_movie_title(imdb_id: str):
     meta = r.json().get("meta", {})
     return meta.get("name", ""), str(meta.get("year", ""))
 
+
 # -----------------------
-# PikPak client (safe reuse)
+# PikPak client
 # -----------------------
 client = None
 
@@ -71,6 +98,7 @@ async def get_client():
     await client.login()
     return client
 
+
 # -----------------------
 # Walk PikPak files
 # -----------------------
@@ -83,12 +111,6 @@ async def walk_files(pk, parent_id=""):
         else:
             yield f
 
-# -----------------------
-# Root
-# -----------------------
-@app.get("/")
-def root():
-    return {"status": "ok", "message": "PikPak Seedr-style addon running"}
 
 # -----------------------
 # Manifest
@@ -97,9 +119,9 @@ def root():
 def manifest():
     return {
         "id": "com.arun.pikpak.seedrstyle",
-        "version": "3.0.0",
+        "version": "4.0.0",
         "name": "PikPak Personal Cloud",
-        "description": "Seedr-style PikPak addon with IMDb support",
+        "description": "Seedr-style PikPak addon (catalog + IMDb pages)",
         "resources": ["catalog", "stream", "meta"],
         "types": ["movie"],
         "catalogs": [
@@ -111,8 +133,9 @@ def manifest():
         ]
     }
 
+
 # -----------------------
-# Catalog (Seedr-style IDs)
+# Catalog (Seedr-style)
 # -----------------------
 @app.get("/catalog/movie/pikpak.json")
 async def catalog():
@@ -145,8 +168,9 @@ async def catalog():
 
     return {"metas": metas}
 
+
 # -----------------------
-# Meta (REQUIRED for custom IDs)
+# Meta (REQUIRED)
 # -----------------------
 @app.get("/meta/movie/{id}.json")
 def meta(id: str):
@@ -157,6 +181,7 @@ def meta(id: str):
             "name": id
         }
     }
+
 
 # -----------------------
 # Stream (Seedr + IMDb bridge)
@@ -169,7 +194,7 @@ async def stream(type: str, id: str):
     pk = await get_client()
     streams = []
 
-    # 🔥 IMDb → catalog ID bridge
+    # IMDb → catalog ID bridge
     if id.startswith("tt"):
         title, year = get_movie_title(id)
         id = normalize(title + year)
@@ -195,7 +220,7 @@ async def stream(type: str, id: str):
         if url:
             streams.append({
                 "name": "PikPak",
-                "title": name,
+                "title": f["name"],
                 "url": url
             })
 
