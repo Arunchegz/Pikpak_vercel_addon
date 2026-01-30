@@ -24,8 +24,9 @@ app.add_middleware(
 # Constants
 # --------------------------------------------------
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
-ACCESS_TOKEN_TTL = 3600
-REFRESH_TOKEN_TTL = 86400
+
+ACCESS_TOKEN_TTL = 3600      # 1 hour
+REFRESH_TOKEN_TTL = 86400    # 24 hours
 
 # --------------------------------------------------
 # Redis (Upstash)
@@ -70,7 +71,7 @@ def get_movie_info(imdb_id: str):
     return meta.get("name", ""), str(meta.get("year", ""))
 
 # --------------------------------------------------
-# PikPak Client (SAFE AUTH FLOW)
+# PikPak Client (FINAL SAFE AUTH FLOW)
 # --------------------------------------------------
 async def get_client():
     from pikpakapi import PikPakApi
@@ -89,39 +90,60 @@ async def get_client():
 
     client = PikPakApi(EMAIL, PASSWORD)
 
-    # 1️⃣ Access token valid
+    # 🔥 APPLY TOKEN CORRECTLY (THIS WAS THE MISSING PART)
+    def apply_token(token: str):
+        client.access_token = token
+        client._headers["Authorization"] = f"Bearer {token}"
+
+    # 1️⃣ Access token still valid
     if access_token and expires_at and now < float(expires_at):
-        client.access_token = access_token
+        apply_token(access_token)
         return client
 
-    # 2️⃣ Refresh token
+    # 2️⃣ Try refresh token
     if refresh_token:
         try:
             await client.refresh_token_login(refresh_token)
+            apply_token(client.access_token)
+
             redis_set("pikpak:access_token", client.access_token, ACCESS_TOKEN_TTL)
             redis_set("pikpak:refresh_token", client.refresh_token, REFRESH_TOKEN_TTL)
-            redis_set("pikpak:expires_at", str(now + ACCESS_TOKEN_TTL - 60), ACCESS_TOKEN_TTL)
+            redis_set(
+                "pikpak:expires_at",
+                str(now + ACCESS_TOKEN_TTL - 60),
+                ACCESS_TOKEN_TTL
+            )
             return client
-        except:
+        except Exception:
             pass
 
-    # 3️⃣ Auth lock (Vercel-safe)
+    # 3️⃣ Auth lock (prevents parallel login)
     if redis_get("pikpak:auth_lock"):
         await asyncio.sleep(2)
+
         access_token = redis_get("pikpak:access_token")
         expires_at = redis_get("pikpak:expires_at")
+
         if access_token and expires_at and time.time() < float(expires_at):
-            client.access_token = access_token
+            apply_token(access_token)
             return client
 
+    # Acquire lock
     redis_set("pikpak:auth_lock", "1", 30)
 
     try:
         await client.login()
+        apply_token(client.access_token)
+
         redis_set("pikpak:access_token", client.access_token, ACCESS_TOKEN_TTL)
         redis_set("pikpak:refresh_token", client.refresh_token, REFRESH_TOKEN_TTL)
-        redis_set("pikpak:expires_at", str(time.time() + ACCESS_TOKEN_TTL - 60), ACCESS_TOKEN_TTL)
+        redis_set(
+            "pikpak:expires_at",
+            str(time.time() + ACCESS_TOKEN_TTL - 60),
+            ACCESS_TOKEN_TTL
+        )
         return client
+
     finally:
         redis_del("pikpak:auth_lock")
 
@@ -160,9 +182,9 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.7.0",
+        "version": "1.8.0",
         "name": "PikPak Cloud",
-        "description": "Direct-play PikPak addon with stable auth",
+        "description": "Direct-play PikPak addon (stable auth, no captcha)",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
         "catalogs": [
@@ -203,14 +225,14 @@ async def catalog(type: str, id: str):
     return {"metas": metas}
 
 # --------------------------------------------------
-# Stream (🔥 FIXED)
+# Stream (DIRECT PLAY + IMDb)
 # --------------------------------------------------
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
 
     pk = await get_client()
 
-    # 🔥 Direct cloud playback for catalog items
+    # 🔥 Direct cloud playback (catalog items)
     if not id.startswith("tt"):
         try:
             file_id = id.split(":", 1)[1]
@@ -238,7 +260,7 @@ async def stream(type: str, id: str):
             }]
         } if url else {"streams": []}
 
-    # IMDb-based matching
+    # IMDb movie page matching
     title, year = get_movie_info(id)
     title_n = normalize(title)
 
