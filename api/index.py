@@ -60,7 +60,8 @@ JUNK_WORDS = [
     "bluray", "brrip", "webrip", "webdl", "hdrip",
     "x264", "x265", "h264", "h265", "hevc",
     "aac", "dts", "ddp", "atmos",
-    "yts", "rarbg", "esubs", "subs"
+    "yts", "rarbg", "esubs", "subs",
+    "hindi", "tamil", "telugu", "malayalam"
 ]
 
 def clean_filename(name: str) -> str:
@@ -153,9 +154,9 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.4.0",
+        "version": "1.5.0",
         "name": "PikPak Cloud",
-        "description": "Stream your PikPak files + auto match IMDb movies",
+        "description": "Stream your PikPak files + smart IMDb matching",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
         "catalogs": [
@@ -204,7 +205,7 @@ async def catalog(type: str, id: str):
 async def stream(type: str, id: str):
     pk = await get_client()
 
-    # Direct play (catalog)
+    # Direct play from catalog
     if id.startswith("pikpak:"):
         file_id = id.split(":", 1)[1]
         cached = get_cached_url(file_id)
@@ -254,14 +255,18 @@ async def stream(type: str, id: str):
 
         file_clean = clean_filename(name)
 
+        # Title match (required)
         if not (
             title_clean in file_clean or
             loose_match(title_clean, file_clean)
         ):
             continue
 
-        if movie_year and movie_year not in file_clean:
-            continue
+        # SOFT year match (important fix)
+        if movie_year:
+            year_in_file = re.search(r"(19|20)\d{2}", file_clean)
+            if year_in_file and year_in_file.group() != movie_year:
+                continue
 
         cached = get_cached_url(fid)
         if cached:
