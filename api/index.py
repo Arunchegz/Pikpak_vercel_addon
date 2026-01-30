@@ -71,7 +71,7 @@ def get_movie_info(imdb_id: str):
     return meta.get("name", ""), str(meta.get("year", ""))
 
 # --------------------------------------------------
-# PikPak Client (FINAL SAFE AUTH FLOW)
+# PikPak Client (CORRECT AUTH HANDLING)
 # --------------------------------------------------
 async def get_client():
     from pikpakapi import PikPakApi
@@ -90,10 +90,10 @@ async def get_client():
 
     client = PikPakApi(EMAIL, PASSWORD)
 
-    # 🔥 APPLY TOKEN CORRECTLY (THIS WAS THE MISSING PART)
+    # ✅ correct way to apply token for current pikpakapi
     def apply_token(token: str):
         client.access_token = token
-        client._headers["Authorization"] = f"Bearer {token}"
+        client.client.headers["Authorization"] = f"Bearer {token}"
 
     # 1️⃣ Access token still valid
     if access_token and expires_at and now < float(expires_at):
@@ -117,7 +117,7 @@ async def get_client():
         except Exception:
             pass
 
-    # 3️⃣ Auth lock (prevents parallel login)
+    # 3️⃣ Redis auth lock (prevents parallel login)
     if redis_get("pikpak:auth_lock"):
         await asyncio.sleep(2)
 
@@ -182,9 +182,9 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.8.0",
+        "version": "1.9.0",
         "name": "PikPak Cloud",
-        "description": "Direct-play PikPak addon (stable auth, no captcha)",
+        "description": "Direct-play PikPak addon with stable token auth",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
         "catalogs": [
@@ -232,7 +232,7 @@ async def stream(type: str, id: str):
 
     pk = await get_client()
 
-    # 🔥 Direct cloud playback (catalog items)
+    # 🔥 Direct play for catalog items
     if not id.startswith("tt"):
         try:
             file_id = id.split(":", 1)[1]
