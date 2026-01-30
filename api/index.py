@@ -24,9 +24,8 @@ app.add_middleware(
 # Constants
 # --------------------------------------------------
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
-
-ACCESS_TOKEN_TTL = 3600       # 1 hour (safe hardcoded)
-REFRESH_TOKEN_TTL = 86400     # 24 hours
+ACCESS_TOKEN_TTL = 3600
+REFRESH_TOKEN_TTL = 86400
 
 # --------------------------------------------------
 # Redis (Upstash)
@@ -90,54 +89,39 @@ async def get_client():
 
     client = PikPakApi(EMAIL, PASSWORD)
 
-    # 1️⃣ Access token still valid
+    # 1️⃣ Access token valid
     if access_token and expires_at and now < float(expires_at):
         client.access_token = access_token
         return client
 
-    # 2️⃣ Try refresh token
+    # 2️⃣ Refresh token
     if refresh_token:
         try:
             await client.refresh_token_login(refresh_token)
-
             redis_set("pikpak:access_token", client.access_token, ACCESS_TOKEN_TTL)
             redis_set("pikpak:refresh_token", client.refresh_token, REFRESH_TOKEN_TTL)
-            redis_set(
-                "pikpak:expires_at",
-                str(now + ACCESS_TOKEN_TTL - 60),
-                ACCESS_TOKEN_TTL
-            )
+            redis_set("pikpak:expires_at", str(now + ACCESS_TOKEN_TTL - 60), ACCESS_TOKEN_TTL)
             return client
-        except Exception:
+        except:
             pass
 
-    # 3️⃣ Auth lock (prevents parallel login / captcha)
+    # 3️⃣ Auth lock (Vercel-safe)
     if redis_get("pikpak:auth_lock"):
         await asyncio.sleep(2)
-
         access_token = redis_get("pikpak:access_token")
         expires_at = redis_get("pikpak:expires_at")
-
         if access_token and expires_at and time.time() < float(expires_at):
             client.access_token = access_token
             return client
 
-    # Acquire lock
     redis_set("pikpak:auth_lock", "1", 30)
 
     try:
         await client.login()
-
         redis_set("pikpak:access_token", client.access_token, ACCESS_TOKEN_TTL)
         redis_set("pikpak:refresh_token", client.refresh_token, REFRESH_TOKEN_TTL)
-        redis_set(
-            "pikpak:expires_at",
-            str(time.time() + ACCESS_TOKEN_TTL - 60),
-            ACCESS_TOKEN_TTL
-        )
-
+        redis_set("pikpak:expires_at", str(time.time() + ACCESS_TOKEN_TTL - 60), ACCESS_TOKEN_TTL)
         return client
-
     finally:
         redis_del("pikpak:auth_lock")
 
@@ -176,9 +160,9 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.6.0",
+        "version": "1.7.0",
         "name": "PikPak Cloud",
-        "description": "PikPak addon with refresh-token auth & Redis lock",
+        "description": "Direct-play PikPak addon with stable auth",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
         "catalogs": [
@@ -219,16 +203,20 @@ async def catalog(type: str, id: str):
     return {"metas": metas}
 
 # --------------------------------------------------
-# Stream
+# Stream (🔥 FIXED)
 # --------------------------------------------------
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
 
     pk = await get_client()
 
-    # Direct catalog playback
-    if id.startswith("pikpak:"):
-        file_id = id.replace("pikpak:", "")
+    # 🔥 Direct cloud playback for catalog items
+    if not id.startswith("tt"):
+        try:
+            file_id = id.split(":", 1)[1]
+        except:
+            return {"streams": []}
+
         data = await pk.get_download_url(file_id)
 
         url = (
@@ -242,12 +230,15 @@ async def stream(type: str, id: str):
             if medias:
                 url = medias[0].get("link", {}).get("url")
 
-        return {"streams": [{"name": "PikPak", "url": url}]} if url else {"streams": []}
+        return {
+            "streams": [{
+                "name": "PikPak",
+                "title": "Direct Play",
+                "url": url
+            }]
+        } if url else {"streams": []}
 
-    # IMDb matching
-    if type != "movie":
-        return {"streams": []}
-
+    # IMDb-based matching
     title, year = get_movie_info(id)
     title_n = normalize(title)
 
