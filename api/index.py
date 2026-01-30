@@ -25,8 +25,7 @@ app.add_middleware(
 # --------------------------------------------------
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
 
-ACCESS_TOKEN_TTL = 3600      # 1 hour
-REFRESH_TOKEN_TTL = 86400    # 24 hours
+LOGIN_TTL = 3600  # login at most once per hour
 
 # --------------------------------------------------
 # Redis (Upstash)
@@ -71,7 +70,7 @@ def get_movie_info(imdb_id: str):
     return meta.get("name", ""), str(meta.get("year", ""))
 
 # --------------------------------------------------
-# PikPak Client (VERSION-SAFE)
+# PikPak Client (LIBRARY-SAFE)
 # --------------------------------------------------
 async def get_client():
     from pikpakapi import PikPakApi
@@ -83,34 +82,31 @@ async def get_client():
         raise Exception("Missing PikPak credentials")
 
     now = time.time()
-
-    expires_at = redis_get("pikpak:expires_at")
+    expires_at = redis_get("pikpak:login_expires")
 
     client = PikPakApi(EMAIL, PASSWORD)
 
-    # 1️⃣ Token still valid → do nothing
+    # ✅ Login still fresh → do nothing
     if expires_at and now < float(expires_at):
         return client
 
-    # 2️⃣ Redis auth lock (prevent parallel login)
+    # 🔒 Auth lock (prevents parallel login)
     if redis_get("pikpak:auth_lock"):
         await asyncio.sleep(2)
-
-        expires_at = redis_get("pikpak:expires_at")
+        expires_at = redis_get("pikpak:login_expires")
         if expires_at and time.time() < float(expires_at):
             return client
 
-    # Acquire lock
     redis_set("pikpak:auth_lock", "1", 30)
 
     try:
-        # Login ONLY when needed
+        # 🔥 Only supported auth method
         await client.login()
 
         redis_set(
-            "pikpak:expires_at",
-            str(time.time() + ACCESS_TOKEN_TTL - 60),
-            ACCESS_TOKEN_TTL
+            "pikpak:login_expires",
+            str(time.time() + LOGIN_TTL - 60),
+            LOGIN_TTL
         )
         return client
 
@@ -152,7 +148,7 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "name": "PikPak Cloud",
         "description": "Direct-play PikPak addon (library-safe auth)",
         "types": ["movie"],
@@ -202,7 +198,7 @@ async def stream(type: str, id: str):
 
     pk = await get_client()
 
-    # Direct play for catalog items
+    # Direct play (catalog notice)
     if not id.startswith("tt"):
         try:
             file_id = id.split(":", 1)[1]
