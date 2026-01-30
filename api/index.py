@@ -24,7 +24,9 @@ app.add_middleware(
 # Constants
 # --------------------------------------------------
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
-CACHE_TTL = 60 * 60 * 24  # 24h
+
+ACCESS_TOKEN_TTL = 3600       # 1 hour (safe hardcoded)
+REFRESH_TOKEN_TTL = 86400     # 24 hours
 
 # --------------------------------------------------
 # Redis (Upstash)
@@ -69,7 +71,7 @@ def get_movie_info(imdb_id: str):
     return meta.get("name", ""), str(meta.get("year", ""))
 
 # --------------------------------------------------
-# PikPak Client (TOKEN + REFRESH + AUTH LOCK)
+# PikPak Client (SAFE AUTH FLOW)
 # --------------------------------------------------
 async def get_client():
     from pikpakapi import PikPakApi
@@ -88,7 +90,7 @@ async def get_client():
 
     client = PikPakApi(EMAIL, PASSWORD)
 
-    # 1️⃣ Access token valid
+    # 1️⃣ Access token still valid
     if access_token and expires_at and now < float(expires_at):
         client.access_token = access_token
         return client
@@ -98,18 +100,18 @@ async def get_client():
         try:
             await client.refresh_token_login(refresh_token)
 
-            redis_set("pikpak:access_token", client.access_token, 3600)
-            redis_set("pikpak:refresh_token", client.refresh_token, 86400)
+            redis_set("pikpak:access_token", client.access_token, ACCESS_TOKEN_TTL)
+            redis_set("pikpak:refresh_token", client.refresh_token, REFRESH_TOKEN_TTL)
             redis_set(
                 "pikpak:expires_at",
-                str(now + client.expires_in - 60),
-                3600
+                str(now + ACCESS_TOKEN_TTL - 60),
+                ACCESS_TOKEN_TTL
             )
             return client
         except Exception:
             pass
 
-    # 3️⃣ AUTH LOCK (critical for Vercel)
+    # 3️⃣ Auth lock (prevents parallel login / captcha)
     if redis_get("pikpak:auth_lock"):
         await asyncio.sleep(2)
 
@@ -126,12 +128,12 @@ async def get_client():
     try:
         await client.login()
 
-        redis_set("pikpak:access_token", client.access_token, 3600)
-        redis_set("pikpak:refresh_token", client.refresh_token, 86400)
+        redis_set("pikpak:access_token", client.access_token, ACCESS_TOKEN_TTL)
+        redis_set("pikpak:refresh_token", client.refresh_token, REFRESH_TOKEN_TTL)
         redis_set(
             "pikpak:expires_at",
-            str(time.time() + client.expires_in - 60),
-            3600
+            str(time.time() + ACCESS_TOKEN_TTL - 60),
+            ACCESS_TOKEN_TTL
         )
 
         return client
@@ -174,9 +176,9 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.5.0",
+        "version": "1.6.0",
         "name": "PikPak Cloud",
-        "description": "Stable PikPak streaming with refresh-token & Redis lock",
+        "description": "PikPak addon with refresh-token auth & Redis lock",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
         "catalogs": [
