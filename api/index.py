@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import re
 import time
+import asyncio
 import requests
 from upstash_redis import Redis
 
@@ -45,6 +46,12 @@ def redis_set(key, value, ttl=None):
     except:
         pass
 
+def redis_del(key):
+    try:
+        redis.delete(key)
+    except:
+        pass
+
 # --------------------------------------------------
 # Utils
 # --------------------------------------------------
@@ -62,7 +69,7 @@ def get_movie_info(imdb_id: str):
     return meta.get("name", ""), str(meta.get("year", ""))
 
 # --------------------------------------------------
-# PikPak Client (ACCESS + REFRESH TOKEN FLOW)
+# PikPak Client (TOKEN + REFRESH + AUTH LOCK)
 # --------------------------------------------------
 async def get_client():
     from pikpakapi import PikPakApi
@@ -73,11 +80,12 @@ async def get_client():
     if not EMAIL or not PASSWORD:
         raise Exception("Missing PikPak credentials")
 
+    now = time.time()
+
     access_token = redis_get("pikpak:access_token")
     refresh_token = redis_get("pikpak:refresh_token")
     expires_at = redis_get("pikpak:expires_at")
 
-    now = time.time()
     client = PikPakApi(EMAIL, PASSWORD)
 
     # 1️⃣ Access token valid
@@ -98,21 +106,38 @@ async def get_client():
                 3600
             )
             return client
-        except Exception as e:
-            print("Refresh failed:", e)
+        except Exception:
+            pass
 
-    # 3️⃣ Full login (last resort)
-    await client.login()
+    # 3️⃣ AUTH LOCK (critical for Vercel)
+    if redis_get("pikpak:auth_lock"):
+        await asyncio.sleep(2)
 
-    redis_set("pikpak:access_token", client.access_token, 3600)
-    redis_set("pikpak:refresh_token", client.refresh_token, 86400)
-    redis_set(
-        "pikpak:expires_at",
-        str(now + client.expires_in - 60),
-        3600
-    )
+        access_token = redis_get("pikpak:access_token")
+        expires_at = redis_get("pikpak:expires_at")
 
-    return client
+        if access_token and expires_at and time.time() < float(expires_at):
+            client.access_token = access_token
+            return client
+
+    # Acquire lock
+    redis_set("pikpak:auth_lock", "1", 30)
+
+    try:
+        await client.login()
+
+        redis_set("pikpak:access_token", client.access_token, 3600)
+        redis_set("pikpak:refresh_token", client.refresh_token, 86400)
+        redis_set(
+            "pikpak:expires_at",
+            str(time.time() + client.expires_in - 60),
+            3600
+        )
+
+        return client
+
+    finally:
+        redis_del("pikpak:auth_lock")
 
 # --------------------------------------------------
 # Recursive File Listing
@@ -122,6 +147,7 @@ async def collect_files(pk, parent_id="", result=None):
         result = []
 
     data = await pk.file_list(parent_id=parent_id)
+
     for f in data.get("files", []):
         if f.get("kind") == "drive#folder":
             await collect_files(pk, f["id"], result)
@@ -148,9 +174,9 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.4.0",
+        "version": "1.5.0",
         "name": "PikPak Cloud",
-        "description": "Stable PikPak streaming with refresh-token auth",
+        "description": "Stable PikPak streaming with refresh-token & Redis lock",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
         "catalogs": [
@@ -171,8 +197,11 @@ async def catalog(type: str, id: str):
     if type != "movie" or id != "pikpak":
         return {"metas": []}
 
-    pk = await get_client()
-    files = await collect_files(pk)
+    try:
+        pk = await get_client()
+        files = await collect_files(pk)
+    except Exception as e:
+        return {"metas": [], "error": str(e)}
 
     metas = []
     for f in files:
@@ -195,7 +224,7 @@ async def stream(type: str, id: str):
 
     pk = await get_client()
 
-    # Direct catalog play
+    # Direct catalog playback
     if id.startswith("pikpak:"):
         file_id = id.replace("pikpak:", "")
         data = await pk.get_download_url(file_id)
