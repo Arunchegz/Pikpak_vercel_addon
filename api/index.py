@@ -23,8 +23,8 @@ app.add_middleware(
 # -----------------------
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
 
-CACHE_TTL = 60 * 60 * 24          # 24h (file URLs)
-AUTH_TTL = 60 * 60 * 24 * 7       # 7 days (pikpak token)
+URL_CACHE_TTL = 60 * 60 * 24       # 24h stream URL cache
+AUTH_CACHE_TTL = 60 * 60 * 24 * 7  # 7 days auth cache
 
 # -----------------------
 # Redis
@@ -46,7 +46,7 @@ def get_cached_url(file_id: str):
 
 def set_cached_url(file_id: str, url: str):
     try:
-        redis.set(f"pikpak:url:{file_id}", url, ex=CACHE_TTL)
+        redis.set(f"pikpak:url:{file_id}", url, ex=URL_CACHE_TTL)
     except:
         pass
 
@@ -60,7 +60,7 @@ def load_auth():
 
 def save_auth(auth: dict):
     try:
-        redis.set("pikpak:auth", auth, ex=AUTH_TTL)
+        redis.set("pikpak:auth", auth, ex=AUTH_CACHE_TTL)
     except:
         pass
 
@@ -80,12 +80,19 @@ def get_movie_info(imdb_id: str):
     return meta.get("name", ""), str(meta.get("year", ""))
 
 # -----------------------
-# PikPak client
+# PikPak client with refresh token
 # -----------------------
 client = None
 
 
 async def get_client(force_login=False):
+    """
+    Auth order:
+    1. Restore auth from Redis
+    2. Validate
+    3. Refresh token
+    4. Full login (last resort)
+    """
     global client
     from pikpakapi import PikPakApi
 
@@ -100,17 +107,28 @@ async def get_client(force_login=False):
 
     client = PikPakApi(EMAIL, PASSWORD)
 
-    # Try restore token
     auth = load_auth()
+
+    # ---------- Restore token ----------
     if auth and not force_login:
+        client.auth = auth
+
+        # 1) Try using access token
         try:
-            client.auth = auth
-            await client.user_info()  # validate token
+            await client.user_info()
             return client
         except Exception:
             pass
 
-    # Fresh login
+        # 2) Try refresh token
+        try:
+            await client.refresh_access_token()
+            save_auth(client.auth)
+            return client
+        except Exception:
+            pass
+
+    # ---------- Full login fallback ----------
     await client.login()
     save_auth(client.auth)
     return client
@@ -121,13 +139,15 @@ async def with_relogin(fn, *args, **kwargs):
         return await fn(*args, **kwargs)
     except Exception as e:
         msg = str(e).lower()
+
         if "401" in msg or "unauthorized" in msg:
             pk = await get_client(force_login=True)
             return await fn(*args, **kwargs)
+
         raise
 
 # -----------------------
-# File collection
+# File traversal
 # -----------------------
 async def collect_files(pk, parent_id="", result=None):
     if result is None:
@@ -162,9 +182,9 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.3.0",
+        "version": "1.4.0",
         "name": "PikPak Cloud",
-        "description": "Stream files from PikPak with token persistence",
+        "description": "PikPak Stremio addon with refresh-token auth",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
         "catalogs": [
