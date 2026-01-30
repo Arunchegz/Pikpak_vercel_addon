@@ -71,7 +71,7 @@ def get_movie_info(imdb_id: str):
     return meta.get("name", ""), str(meta.get("year", ""))
 
 # --------------------------------------------------
-# PikPak Client (CORRECT AUTH HANDLING)
+# PikPak Client (VERSION-SAFE)
 # --------------------------------------------------
 async def get_client():
     from pikpakapi import PikPakApi
@@ -84,59 +84,29 @@ async def get_client():
 
     now = time.time()
 
-    access_token = redis_get("pikpak:access_token")
-    refresh_token = redis_get("pikpak:refresh_token")
     expires_at = redis_get("pikpak:expires_at")
 
     client = PikPakApi(EMAIL, PASSWORD)
 
-    # ✅ correct way to apply token for current pikpakapi
-    def apply_token(token: str):
-        client.access_token = token
-        client.client.headers["Authorization"] = f"Bearer {token}"
-
-    # 1️⃣ Access token still valid
-    if access_token and expires_at and now < float(expires_at):
-        apply_token(access_token)
+    # 1️⃣ Token still valid → do nothing
+    if expires_at and now < float(expires_at):
         return client
 
-    # 2️⃣ Try refresh token
-    if refresh_token:
-        try:
-            await client.refresh_token_login(refresh_token)
-            apply_token(client.access_token)
-
-            redis_set("pikpak:access_token", client.access_token, ACCESS_TOKEN_TTL)
-            redis_set("pikpak:refresh_token", client.refresh_token, REFRESH_TOKEN_TTL)
-            redis_set(
-                "pikpak:expires_at",
-                str(now + ACCESS_TOKEN_TTL - 60),
-                ACCESS_TOKEN_TTL
-            )
-            return client
-        except Exception:
-            pass
-
-    # 3️⃣ Redis auth lock (prevents parallel login)
+    # 2️⃣ Redis auth lock (prevent parallel login)
     if redis_get("pikpak:auth_lock"):
         await asyncio.sleep(2)
 
-        access_token = redis_get("pikpak:access_token")
         expires_at = redis_get("pikpak:expires_at")
-
-        if access_token and expires_at and time.time() < float(expires_at):
-            apply_token(access_token)
+        if expires_at and time.time() < float(expires_at):
             return client
 
     # Acquire lock
     redis_set("pikpak:auth_lock", "1", 30)
 
     try:
+        # Login ONLY when needed
         await client.login()
-        apply_token(client.access_token)
 
-        redis_set("pikpak:access_token", client.access_token, ACCESS_TOKEN_TTL)
-        redis_set("pikpak:refresh_token", client.refresh_token, REFRESH_TOKEN_TTL)
         redis_set(
             "pikpak:expires_at",
             str(time.time() + ACCESS_TOKEN_TTL - 60),
@@ -182,9 +152,9 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.9.0",
+        "version": "2.0.0",
         "name": "PikPak Cloud",
-        "description": "Direct-play PikPak addon with stable token auth",
+        "description": "Direct-play PikPak addon (library-safe auth)",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
         "catalogs": [
@@ -225,14 +195,14 @@ async def catalog(type: str, id: str):
     return {"metas": metas}
 
 # --------------------------------------------------
-# Stream (DIRECT PLAY + IMDb)
+# Stream
 # --------------------------------------------------
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
 
     pk = await get_client()
 
-    # 🔥 Direct play for catalog items
+    # Direct play for catalog items
     if not id.startswith("tt"):
         try:
             file_id = id.split(":", 1)[1]
@@ -260,7 +230,7 @@ async def stream(type: str, id: str):
             }]
         } if url else {"streams": []}
 
-    # IMDb movie page matching
+    # IMDb matching
     title, year = get_movie_info(id)
     title_n = normalize(title)
 
