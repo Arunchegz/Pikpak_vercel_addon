@@ -1,12 +1,15 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from upstash_redis import Redis
-import os, re, time, asyncio, requests, json
+import os, re, requests, asyncio, time
 
 from pikpakapi import PikPakApi
 
 app = FastAPI()
 
+# -----------------------
+# CORS
+# -----------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,8 +26,10 @@ redis = Redis(
 )
 
 # -----------------------
-# Utils (Seedr-style)
+# Helpers (Seedr-style)
 # -----------------------
+VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".ts")
+
 def normalize(text: str):
     return re.sub(r"[^a-z0-9]", "", text.lower())
 
@@ -38,8 +43,16 @@ def extract_title_year(filename: str):
 
     return title, year
 
+def get_movie_title(imdb_id: str):
+    r = requests.get(
+        f"https://v3-cinemeta.strem.io/meta/movie/{imdb_id}.json",
+        timeout=10
+    )
+    meta = r.json().get("meta", {})
+    return meta.get("name", ""), str(meta.get("year", ""))
+
 # -----------------------
-# PikPak client (safe login)
+# PikPak client (safe reuse)
 # -----------------------
 client = None
 
@@ -48,15 +61,18 @@ async def get_client():
     if client:
         return client
 
-    EMAIL = os.environ["PIKPAK_EMAIL"]
-    PASSWORD = os.environ["PIKPAK_PASSWORD"]
+    EMAIL = os.environ.get("PIKPAK_EMAIL")
+    PASSWORD = os.environ.get("PIKPAK_PASSWORD")
+
+    if not EMAIL or not PASSWORD:
+        raise Exception("PIKPAK_EMAIL or PIKPAK_PASSWORD missing")
 
     client = PikPakApi(EMAIL, PASSWORD)
     await client.login()
     return client
 
 # -----------------------
-# Walk files
+# Walk PikPak files
 # -----------------------
 async def walk_files(pk, parent_id=""):
     data = await pk.file_list(parent_id=parent_id)
@@ -68,15 +84,22 @@ async def walk_files(pk, parent_id=""):
             yield f
 
 # -----------------------
+# Root
+# -----------------------
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "PikPak Seedr-style addon running"}
+
+# -----------------------
 # Manifest
 # -----------------------
 @app.get("/manifest.json")
 def manifest():
     return {
         "id": "com.arun.pikpak.seedrstyle",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "name": "PikPak Personal Cloud",
-        "description": "Seedr-style PikPak addon (Movie pages supported)",
+        "description": "Seedr-style PikPak addon with IMDb support",
         "resources": ["catalog", "stream", "meta"],
         "types": ["movie"],
         "catalogs": [
@@ -93,18 +116,24 @@ def manifest():
 # -----------------------
 @app.get("/catalog/movie/pikpak.json")
 async def catalog():
-    metas = []
     pk = await get_client()
+    metas = []
+    seen = set()
 
     async for f in walk_files(pk):
-        if not f["name"].lower().endswith((".mp4", ".mkv", ".avi", ".mov", ".ts")):
+        name = f.get("name", "")
+        if not name.lower().endswith(VIDEO_EXT):
             continue
 
-        title, year = extract_title_year(f["name"])
+        title, year = extract_title_year(name)
         if not title:
             continue
 
         meta_id = normalize(title + year)
+        if meta_id in seen:
+            continue
+
+        seen.add(meta_id)
 
         metas.append({
             "id": meta_id,
@@ -117,7 +146,7 @@ async def catalog():
     return {"metas": metas}
 
 # -----------------------
-# Meta (REQUIRED)
+# Meta (REQUIRED for custom IDs)
 # -----------------------
 @app.get("/meta/movie/{id}.json")
 def meta(id: str):
@@ -130,36 +159,44 @@ def meta(id: str):
     }
 
 # -----------------------
-# Stream (Seedr-style)
+# Stream (Seedr + IMDb bridge)
 # -----------------------
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
-    streams = []
     if type != "movie":
         return {"streams": []}
 
     pk = await get_client()
+    streams = []
+
+    # 🔥 IMDb → catalog ID bridge
+    if id.startswith("tt"):
+        title, year = get_movie_title(id)
+        id = normalize(title + year)
 
     async for f in walk_files(pk):
-        if not f["name"].lower().endswith((".mp4", ".mkv", ".avi", ".mov", ".ts")):
+        name = f.get("name", "")
+        if not name.lower().endswith(VIDEO_EXT):
             continue
 
-        title, year = extract_title_year(f["name"])
+        title, year = extract_title_year(name)
         file_id = normalize(title + year)
 
-        if file_id == id:
-            data = await pk.get_download_url(f["id"])
-            url = (
-                data.get("links", {})
-                .get("application/octet-stream", {})
-                .get("url")
-            )
+        if file_id != id:
+            continue
 
-            if url:
-                streams.append({
-                    "name": "PikPak",
-                    "title": f["name"],
-                    "url": url
-                })
+        data = await pk.get_download_url(f["id"])
+        url = (
+            data.get("links", {})
+            .get("application/octet-stream", {})
+            .get("url")
+        )
+
+        if url:
+            streams.append({
+                "name": "PikPak",
+                "title": name,
+                "url": url
+            })
 
     return {"streams": streams}
