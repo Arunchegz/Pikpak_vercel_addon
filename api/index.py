@@ -24,7 +24,7 @@ app.add_middleware(
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
 
 URL_CACHE_TTL = 60 * 60 * 24       # 24h stream URL cache
-AUTH_CACHE_TTL = 60 * 60 * 24 * 7  # 7 days auth cache
+AUTH_CACHE_TTL = 60 * 60 * 24 * 365  # 365 days auth cache
 
 # -----------------------
 # Redis
