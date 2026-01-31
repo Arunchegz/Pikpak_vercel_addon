@@ -69,6 +69,27 @@ def save_auth(auth: dict):
         print("[REDIS] AUTH save failed:", e)
 
 # -----------------------
+# Auth helpers (CRITICAL FIX)
+# -----------------------
+def extract_auth(client):
+    return {
+        "access_token": client.access_token,
+        "refresh_token": client.refresh_token,
+        "user_id": getattr(client, "user_id", None),
+        "device_id": getattr(client, "device_id", None),
+    }
+
+
+def restore_auth(client, auth):
+    client.access_token = auth.get("access_token")
+    client.refresh_token = auth.get("refresh_token")
+
+    if auth.get("user_id"):
+        client.user_id = auth.get("user_id")
+    if auth.get("device_id"):
+        client.device_id = auth.get("device_id")
+
+# -----------------------
 # Utils
 # -----------------------
 def normalize(text: str) -> str:
@@ -90,12 +111,6 @@ client = None
 
 
 async def get_client(force_login=False):
-    """
-    Auth order:
-    1) Redis access token
-    2) Refresh token
-    3) Full login (email/password)
-    """
     global client
     from pikpakapi import PikPakApi
 
@@ -110,15 +125,14 @@ async def get_client(force_login=False):
         return client
 
     client = PikPakApi(EMAIL, PASSWORD)
-
     auth = load_auth()
 
-    # ---------- Restore token ----------
+    # ---------- Restore from Redis ----------
     if auth and not force_login:
-        print("[AUTH] Found auth in Redis, restoring token")
-        client.auth = auth
+        print("[AUTH] Restoring auth from Redis")
+        restore_auth(client, auth)
 
-        # 1️⃣ Try access token
+        # 1) Access token
         try:
             await client.user_info()
             print("[AUTH] Access token valid ✅")
@@ -126,19 +140,19 @@ async def get_client(force_login=False):
         except Exception as e:
             print("[AUTH] Access token invalid ❌", str(e))
 
-        # 2️⃣ Try refresh token
+        # 2) Refresh token
         try:
             await client.refresh_access_token()
-            save_auth(client.auth)
+            save_auth(extract_auth(client))
             print("[AUTH] Refresh token success 🔄")
             return client
         except Exception as e:
             print("[AUTH] Refresh token failed ❌", str(e))
 
-    # 3️⃣ Full login fallback
+    # ---------- Full login ----------
     print("[AUTH] FULL LOGIN using EMAIL + PASSWORD 🚨")
     await client.login()
-    save_auth(client.auth)
+    save_auth(extract_auth(client))
     return client
 
 
@@ -146,9 +160,8 @@ async def with_relogin(fn, *args, **kwargs):
     try:
         return await fn(*args, **kwargs)
     except Exception as e:
-        msg = str(e).lower()
-        if "401" in msg or "unauthorized" in msg:
-            print("[AUTH] 401 detected → forcing re-login")
+        if "401" in str(e).lower():
+            print("[AUTH] 401 → forcing full re-login")
             await get_client(force_login=True)
             return await fn(*args, **kwargs)
         raise
@@ -179,15 +192,16 @@ async def root():
     return {
         "status": "ok",
         "addon": "PikPak Stremio Addon",
-        "manifest": "/manifest.json"
+        "manifest": "/manifest.json",
     }
+
 
 @app.get("/debug/auth")
 async def debug_auth():
     auth = load_auth()
     return {
         "auth_in_redis": bool(auth),
-        "auth_keys": list(auth.keys()) if auth else None
+        "keys": list(auth.keys()) if auth else None,
     }
 
 # -----------------------
@@ -197,9 +211,9 @@ async def debug_auth():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.4.1",
+        "version": "1.4.2",
         "name": "PikPak Cloud",
-        "description": "PikPak Stremio addon with token & refresh auth",
+        "description": "PikPak Stremio addon with stable token auth",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
         "catalogs": [{
@@ -207,7 +221,7 @@ async def manifest():
             "id": "pikpak",
             "name": "My PikPak Files"
         }],
-        "idPrefixes": ["tt", "pikpak"]
+        "idPrefixes": ["tt", "pikpak"],
     }
 
 # -----------------------
@@ -235,7 +249,7 @@ async def catalog(type: str, id: str):
             "id": f"pikpak:{file_id}",
             "type": "movie",
             "name": name,
-            "poster": "https://upload.wikimedia.org/wikipedia/commons/8/8c/PikPak_logo.png"
+            "poster": "https://upload.wikimedia.org/wikipedia/commons/8/8c/PikPak_logo.png",
         })
 
     return {"metas": metas}
@@ -245,34 +259,33 @@ async def catalog(type: str, id: str):
 # -----------------------
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
+    if not id.startswith("pikpak:"):
+        return {"streams": []}
 
-    if id.startswith("pikpak:"):
-        file_id = id.replace("pikpak:", "")
-        pk = await get_client()
+    file_id = id.replace("pikpak:", "")
+    pk = await get_client()
 
-        url = get_cached_url(file_id)
+    url = get_cached_url(file_id)
+    if not url:
+        data = await with_relogin(pk.get_download_url, file_id)
+
+        links = data.get("links", {})
+        if "application/octet-stream" in links:
+            url = links["application/octet-stream"]["url"]
+        else:
+            medias = data.get("medias", [])
+            if medias:
+                url = medias[0]["link"]["url"]
+
         if not url:
-            data = await with_relogin(pk.get_download_url, file_id)
+            return {"streams": []}
 
-            links = data.get("links", {})
-            if "application/octet-stream" in links:
-                url = links["application/octet-stream"]["url"]
-            else:
-                medias = data.get("medias", [])
-                if medias:
-                    url = medias[0]["link"]["url"]
+        set_cached_url(file_id, url)
 
-            if not url:
-                return {"streams": []}
-
-            set_cached_url(file_id, url)
-
-        return {
-            "streams": [{
-                "name": "PikPak",
-                "title": "PikPak Direct",
-                "url": url
-            }]
-        }
-
-    return {"streams": []}
+    return {
+        "streams": [{
+            "name": "PikPak",
+            "title": "PikPak Direct",
+            "url": url,
+        }]
+    }
