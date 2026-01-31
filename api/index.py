@@ -5,6 +5,8 @@ import re
 import requests
 from upstash_redis import Redis
 
+print("[BOOT] Cold start - new Vercel instance")
+
 # -----------------------
 # App
 # -----------------------
@@ -23,8 +25,8 @@ app.add_middleware(
 # -----------------------
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
 
-URL_CACHE_TTL = 60 * 60 * 24       # 24h stream URL cache
-AUTH_CACHE_TTL = 60 * 60 * 24 * 365  # 365 days auth cache
+URL_CACHE_TTL = 60 * 60 * 24              # 24 hours
+AUTH_CACHE_TTL = 60 * 60 * 24 * 365       # 1 year
 
 # -----------------------
 # Redis
@@ -40,29 +42,31 @@ redis = Redis(
 def get_cached_url(file_id: str):
     try:
         return redis.get(f"pikpak:url:{file_id}")
-    except:
+    except Exception as e:
+        print("[REDIS] URL get failed:", e)
         return None
 
 
 def set_cached_url(file_id: str, url: str):
     try:
         redis.set(f"pikpak:url:{file_id}", url, ex=URL_CACHE_TTL)
-    except:
-        pass
+    except Exception as e:
+        print("[REDIS] URL set failed:", e)
 
 
 def load_auth():
     try:
         return redis.get("pikpak:auth")
-    except:
+    except Exception as e:
+        print("[REDIS] AUTH load failed:", e)
         return None
 
 
 def save_auth(auth: dict):
     try:
         redis.set("pikpak:auth", auth, ex=AUTH_CACHE_TTL)
-    except:
-        pass
+    except Exception as e:
+        print("[REDIS] AUTH save failed:", e)
 
 # -----------------------
 # Utils
@@ -80,7 +84,7 @@ def get_movie_info(imdb_id: str):
     return meta.get("name", ""), str(meta.get("year", ""))
 
 # -----------------------
-# PikPak client with refresh token
+# PikPak Client
 # -----------------------
 client = None
 
@@ -88,10 +92,9 @@ client = None
 async def get_client(force_login=False):
     """
     Auth order:
-    1. Restore auth from Redis
-    2. Validate
-    3. Refresh token
-    4. Full login (last resort)
+    1) Redis access token
+    2) Refresh token
+    3) Full login (email/password)
     """
     global client
     from pikpakapi import PikPakApi
@@ -103,6 +106,7 @@ async def get_client(force_login=False):
         raise Exception("Missing PIKPAK_EMAIL or PIKPAK_PASSWORD")
 
     if client and not force_login:
+        print("[AUTH] Reusing in-memory client")
         return client
 
     client = PikPakApi(EMAIL, PASSWORD)
@@ -111,24 +115,28 @@ async def get_client(force_login=False):
 
     # ---------- Restore token ----------
     if auth and not force_login:
+        print("[AUTH] Found auth in Redis, restoring token")
         client.auth = auth
 
-        # 1) Try using access token
+        # 1️⃣ Try access token
         try:
             await client.user_info()
+            print("[AUTH] Access token valid ✅")
             return client
-        except Exception:
-            pass
+        except Exception as e:
+            print("[AUTH] Access token invalid ❌", str(e))
 
-        # 2) Try refresh token
+        # 2️⃣ Try refresh token
         try:
             await client.refresh_access_token()
             save_auth(client.auth)
+            print("[AUTH] Refresh token success 🔄")
             return client
-        except Exception:
-            pass
+        except Exception as e:
+            print("[AUTH] Refresh token failed ❌", str(e))
 
-    # ---------- Full login fallback ----------
+    # 3️⃣ Full login fallback
+    print("[AUTH] FULL LOGIN using EMAIL + PASSWORD 🚨")
     await client.login()
     save_auth(client.auth)
     return client
@@ -139,11 +147,10 @@ async def with_relogin(fn, *args, **kwargs):
         return await fn(*args, **kwargs)
     except Exception as e:
         msg = str(e).lower()
-
         if "401" in msg or "unauthorized" in msg:
-            pk = await get_client(force_login=True)
+            print("[AUTH] 401 detected → forcing re-login")
+            await get_client(force_login=True)
             return await fn(*args, **kwargs)
-
         raise
 
 # -----------------------
@@ -175,6 +182,14 @@ async def root():
         "manifest": "/manifest.json"
     }
 
+@app.get("/debug/auth")
+async def debug_auth():
+    auth = load_auth()
+    return {
+        "auth_in_redis": bool(auth),
+        "auth_keys": list(auth.keys()) if auth else None
+    }
+
 # -----------------------
 # Manifest
 # -----------------------
@@ -182,18 +197,16 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.4.0",
+        "version": "1.4.1",
         "name": "PikPak Cloud",
-        "description": "PikPak Stremio addon with refresh-token auth",
+        "description": "PikPak Stremio addon with token & refresh auth",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
-        "catalogs": [
-            {
-                "type": "movie",
-                "id": "pikpak",
-                "name": "My PikPak Files"
-            }
-        ],
+        "catalogs": [{
+            "type": "movie",
+            "id": "pikpak",
+            "name": "My PikPak Files"
+        }],
         "idPrefixes": ["tt", "pikpak"]
     }
 
@@ -215,7 +228,6 @@ async def catalog(type: str, id: str):
 
         if not name or not file_id:
             continue
-
         if not name.lower().endswith(VIDEO_EXT):
             continue
 
@@ -234,7 +246,6 @@ async def catalog(type: str, id: str):
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
 
-    # Direct catalog playback
     if id.startswith("pikpak:"):
         file_id = id.replace("pikpak:", "")
         pk = await get_client()
@@ -264,56 +275,4 @@ async def stream(type: str, id: str):
             }]
         }
 
-    # IMDb matching
-    if type != "movie":
-        return {"streams": []}
-
-    movie_title, movie_year = get_movie_info(id)
-    movie_n = normalize(movie_title)
-
-    pk = await get_client()
-    files = await collect_files(pk)
-
-    streams = []
-
-    for f in files:
-        name = f.get("name")
-        file_id = f.get("id")
-
-        if not name or not file_id:
-            continue
-
-        if not name.lower().endswith(VIDEO_EXT):
-            continue
-
-        file_n = normalize(name)
-
-        if movie_n not in file_n:
-            continue
-        if movie_year and movie_year not in file_n:
-            continue
-
-        url = get_cached_url(file_id)
-        if not url:
-            data = await with_relogin(pk.get_download_url, file_id)
-
-            links = data.get("links", {})
-            if "application/octet-stream" in links:
-                url = links["application/octet-stream"]["url"]
-            else:
-                medias = data.get("medias", [])
-                if medias:
-                    url = medias[0]["link"]["url"]
-
-            if not url:
-                continue
-
-            set_cached_url(file_id, url)
-
-        streams.append({
-            "name": "PikPak",
-            "title": name,
-            "url": url
-        })
-
-    return {"streams": streams}
+    return {"streams": []}
