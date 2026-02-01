@@ -96,7 +96,7 @@ client = None
 async def get_client(force_login=False):
     """
     Auth flow:
-    restore → validate → refresh → login
+    restore → access token → refresh token → email login
     """
     global client
     from pikpakapi import PikPakApi
@@ -113,26 +113,31 @@ async def get_client(force_login=False):
     client = PikPakApi(EMAIL, PASSWORD)
     auth = load_auth()
 
+    # ---------- Restore ----------
     if auth and not force_login:
+        print("[AUTH] restored auth from redis")
         client.auth = auth
 
-        # validate
+        # 1️⃣ Access token path
         try:
             await client.user_info()
-            save_auth(client.auth)  # refresh TTL
+            print("[AUTH] token login (access token valid)")
+            save_auth(client.auth)   # refresh TTL
             return client
         except Exception:
-            pass
+            print("[AUTH] access token invalid")
 
-        # refresh
+        # 2️⃣ Refresh token path
         try:
             await client.refresh_access_token()
+            print("[AUTH] token login (refresh token used)")
             save_auth(client.auth)
             return client
         except Exception:
-            pass
+            print("[AUTH] refresh token failed")
 
-    # full login
+    # ---------- Email login ----------
+    print("[AUTH] EMAIL LOGIN triggered")
     await client.login()
     save_auth(client.auth)
     return client
@@ -143,9 +148,12 @@ async def with_relogin(fn, *args, **kwargs):
         return await fn(*args, **kwargs)
     except Exception as e:
         msg = str(e).lower()
+
         if "401" in msg or "unauthorized" in msg:
+            print("[AUTH] 401 → force email login")
             await get_client(force_login=True)
             return await fn(*args, **kwargs)
+
         raise
 
 # -----------------------
@@ -184,9 +192,9 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.5.0",
+        "version": "1.5.1",
         "name": "PikPak Cloud",
-        "description": "PikPak Stremio addon (catalog + IMDb streams)",
+        "description": "PikPak Stremio addon (auth debug enabled)",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
         "catalogs": [{
@@ -233,9 +241,7 @@ async def catalog(type: str, id: str):
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
 
-    # -----------------------
     # Direct file playback
-    # -----------------------
     if id.startswith("pikpak:"):
         file_id = id.replace("pikpak:", "")
         pk = await get_client()
@@ -263,9 +269,7 @@ async def stream(type: str, id: str):
             "url": url
         }]}
 
-    # -----------------------
     # IMDb movie page
-    # -----------------------
     if type != "movie":
         return {"streams": []}
 
