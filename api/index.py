@@ -156,7 +156,9 @@ async def manifest():
 @app.get("/catalog/movie/pikpak.json")
 async def catalog():
     pk = await get_client()
-    data = await pk.file_list()
+
+    # ✅ IMPORTANT: must pass parent_id
+    data = await pk.file_list(parent_id="")
 
     metas = []
     for f in data.get("files", []):
