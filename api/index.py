@@ -25,8 +25,8 @@ app.add_middleware(
 # -----------------------
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
 
-URL_CACHE_TTL = 60 * 60 * 24              # 24 hours
-AUTH_CACHE_TTL = 60 * 60 * 24 * 365       # 1 year
+URL_CACHE_TTL = 60 * 60 * 24
+AUTH_CACHE_TTL = 60 * 60 * 24 * 365
 
 # -----------------------
 # Redis
@@ -39,42 +39,49 @@ redis = Redis(
 # -----------------------
 # Redis helpers
 # -----------------------
-def get_cached_url(file_id: str):
+def get_cached_url(file_id):
     try:
         return redis.get(f"pikpak:url:{file_id}")
     except Exception as e:
-        print("[REDIS] URL get failed:", e)
+        print("[REDIS] url get failed:", e)
         return None
 
 
-def set_cached_url(file_id: str, url: str):
+def set_cached_url(file_id, url):
     try:
         redis.set(f"pikpak:url:{file_id}", url, ex=URL_CACHE_TTL)
     except Exception as e:
-        print("[REDIS] URL set failed:", e)
+        print("[REDIS] url set failed:", e)
 
 
 def load_auth():
     try:
         return redis.get("pikpak:auth")
     except Exception as e:
-        print("[REDIS] AUTH load failed:", e)
+        print("[REDIS] auth load failed:", e)
         return None
 
 
-def save_auth(auth: dict):
+def save_auth(auth):
+    if not auth:
+        return
     try:
         redis.set("pikpak:auth", auth, ex=AUTH_CACHE_TTL)
     except Exception as e:
-        print("[REDIS] AUTH save failed:", e)
+        print("[REDIS] auth save failed:", e)
 
 # -----------------------
-# Auth helpers (CRITICAL FIX)
+# Auth helpers (CRITICAL)
 # -----------------------
 def extract_auth(client):
+    refresh = getattr(client, "refresh_token", None)
+    if not refresh:
+        print("[AUTH] No refresh token → not saving auth")
+        return None
+
     return {
         "access_token": client.access_token,
-        "refresh_token": client.refresh_token,
+        "refresh_token": refresh,
         "user_id": getattr(client, "user_id", None),
         "device_id": getattr(client, "device_id", None),
     }
@@ -92,13 +99,13 @@ def restore_auth(client, auth):
 # -----------------------
 # Utils
 # -----------------------
-def normalize(text: str) -> str:
+def normalize(text):
     text = text.lower()
     text = re.sub(r"[^a-z0-9 ]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
-def get_movie_info(imdb_id: str):
+def get_movie_info(imdb_id):
     url = f"https://v3-cinemeta.strem.io/meta/movie/{imdb_id}.json"
     r = requests.get(url, timeout=10)
     meta = r.json().get("meta", {})
@@ -121,13 +128,13 @@ async def get_client(force_login=False):
         raise Exception("Missing PIKPAK_EMAIL or PIKPAK_PASSWORD")
 
     if client and not force_login:
-        print("[AUTH] Reusing in-memory client")
+        print("[AUTH] Using in-memory client")
         return client
 
     client = PikPakApi(EMAIL, PASSWORD)
     auth = load_auth()
 
-    # ---------- Restore from Redis ----------
+    # ---------- Restore ----------
     if auth and not force_login:
         print("[AUTH] Restoring auth from Redis")
         restore_auth(client, auth)
@@ -138,16 +145,19 @@ async def get_client(force_login=False):
             print("[AUTH] Access token valid ✅")
             return client
         except Exception as e:
-            print("[AUTH] Access token invalid ❌", str(e))
+            print("[AUTH] Access token invalid ❌", e)
 
-        # 2) Refresh token
-        try:
-            await client.refresh_access_token()
-            save_auth(extract_auth(client))
-            print("[AUTH] Refresh token success 🔄")
-            return client
-        except Exception as e:
-            print("[AUTH] Refresh token failed ❌", str(e))
+        # 2) Refresh ONLY if token exists
+        if auth.get("refresh_token"):
+            try:
+                await client.refresh_access_token()
+                save_auth(extract_auth(client))
+                print("[AUTH] Refresh token success 🔄")
+                return client
+            except Exception as e:
+                print("[AUTH] Refresh token failed ❌", e)
+        else:
+            print("[AUTH] No refresh token → skipping refresh")
 
     # ---------- Full login ----------
     print("[AUTH] FULL LOGIN using EMAIL + PASSWORD 🚨")
@@ -160,8 +170,9 @@ async def with_relogin(fn, *args, **kwargs):
     try:
         return await fn(*args, **kwargs)
     except Exception as e:
-        if "401" in str(e).lower():
-            print("[AUTH] 401 → forcing full re-login")
+        msg = str(e).lower()
+        if "401" in msg or "unauthorized" in msg:
+            print("[AUTH] 401 → forcing FULL login")
             await get_client(force_login=True)
             return await fn(*args, **kwargs)
         raise
@@ -202,6 +213,7 @@ async def debug_auth():
     return {
         "auth_in_redis": bool(auth),
         "keys": list(auth.keys()) if auth else None,
+        "has_refresh": bool(auth.get("refresh_token")) if auth else False,
     }
 
 # -----------------------
@@ -211,15 +223,15 @@ async def debug_auth():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.4.2",
+        "version": "1.4.3",
         "name": "PikPak Cloud",
-        "description": "PikPak Stremio addon with stable token auth",
+        "description": "PikPak Stremio addon (stable auth, Vercel-safe)",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
         "catalogs": [{
             "type": "movie",
             "id": "pikpak",
-            "name": "My PikPak Files"
+            "name": "My PikPak Files",
         }],
         "idPrefixes": ["tt", "pikpak"],
     }
@@ -228,7 +240,7 @@ async def manifest():
 # Catalog
 # -----------------------
 @app.get("/catalog/{type}/{id}.json")
-async def catalog(type: str, id: str):
+async def catalog(type, id):
     if type != "movie" or id != "pikpak":
         return {"metas": []}
 
@@ -258,7 +270,7 @@ async def catalog(type: str, id: str):
 # Stream
 # -----------------------
 @app.get("/stream/{type}/{id}.json")
-async def stream(type: str, id: str):
+async def stream(type, id):
     if not id.startswith("pikpak:"):
         return {"streams": []}
 
