@@ -3,7 +3,17 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import re
 import requests
+import json
+import logging
 from upstash_redis import Redis
+
+# -----------------------
+# Logging (Vercel compatible)
+# -----------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
 
 # -----------------------
 # App
@@ -23,8 +33,8 @@ app.add_middleware(
 # -----------------------
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
 
-URL_CACHE_TTL = 60 * 60 * 24       # 24h stream URL cache
-AUTH_CACHE_TTL = 60 * 60 * 24 * 365  # 365 days auth cache
+URL_CACHE_TTL = 60 * 60 * 24           # 24 hours
+AUTH_CACHE_TTL = 60 * 60 * 24 * 365    # 365 days
 
 # -----------------------
 # Redis
@@ -40,29 +50,31 @@ redis = Redis(
 def get_cached_url(file_id: str):
     try:
         return redis.get(f"pikpak:url:{file_id}")
-    except:
+    except Exception as e:
+        logging.warning(f"[REDIS] get_cached_url error: {e}")
         return None
 
 
 def set_cached_url(file_id: str, url: str):
     try:
         redis.set(f"pikpak:url:{file_id}", url, ex=URL_CACHE_TTL)
-    except:
-        pass
+    except Exception as e:
+        logging.warning(f"[REDIS] set_cached_url error: {e}")
 
 
 def load_auth():
     try:
         return redis.get("pikpak:auth")
-    except:
+    except Exception as e:
+        logging.warning(f"[REDIS] load_auth error: {e}")
         return None
 
 
 def save_auth(auth: dict):
     try:
         redis.set("pikpak:auth", auth, ex=AUTH_CACHE_TTL)
-    except:
-        pass
+    except Exception as e:
+        logging.warning(f"[REDIS] save_auth error: {e}")
 
 # -----------------------
 # Utils
@@ -79,8 +91,23 @@ def get_movie_info(imdb_id: str):
     meta = r.json().get("meta", {})
     return meta.get("name", ""), str(meta.get("year", ""))
 
+
+def log_auth_state(stage: str, auth: dict | None):
+    if not auth:
+        logging.info(f"[AUTH] {stage} | auth=None")
+        return
+
+    safe = {
+        "user_id": auth.get("user_id"),
+        "expires_at": auth.get("expires_at"),
+        "refresh_expires_at": auth.get("refresh_expires_at"),
+        "has_refresh_token": bool(auth.get("refresh_token")),
+    }
+
+    logging.info(f"[AUTH] {stage} | {json.dumps(safe)}")
+
 # -----------------------
-# PikPak client with refresh token
+# PikPak client
 # -----------------------
 client = None
 
@@ -89,7 +116,7 @@ async def get_client(force_login=False):
     """
     Auth order:
     1. Restore auth from Redis
-    2. Validate
+    2. Validate access token
     3. Refresh token
     4. Full login (last resort)
     """
@@ -106,31 +133,38 @@ async def get_client(force_login=False):
         return client
 
     client = PikPakApi(EMAIL, PASSWORD)
-
     auth = load_auth()
 
-    # ---------- Restore token ----------
+    # ---------- Restore auth ----------
     if auth and not force_login:
         client.auth = auth
+        logging.info("[AUTH] Loaded auth from Redis")
+        log_auth_state("restore", auth)
 
-        # 1) Try using access token
+        # 1️⃣ Access token
         try:
             await client.user_info()
+            logging.info("[AUTH] Access token valid")
             return client
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning(f"[AUTH] Access token failed: {e}")
 
-        # 2) Try refresh token
+        # 2️⃣ Refresh token
         try:
             await client.refresh_access_token()
             save_auth(client.auth)
+            logging.info("[AUTH] Refresh token success")
+            log_auth_state("refresh", client.auth)
             return client
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning(f"[AUTH] Refresh token failed: {e}")
 
-    # ---------- Full login fallback ----------
+    # ---------- Full login ----------
+    logging.warning("[AUTH] Full login triggered")
     await client.login()
     save_auth(client.auth)
+    log_auth_state("full_login", client.auth)
+
     return client
 
 
@@ -139,9 +173,11 @@ async def with_relogin(fn, *args, **kwargs):
         return await fn(*args, **kwargs)
     except Exception as e:
         msg = str(e).lower()
+        logging.warning(f"[AUTH] API error: {e}")
 
         if "401" in msg or "unauthorized" in msg:
-            pk = await get_client(force_login=True)
+            logging.warning("[AUTH] 401 detected → force re-login")
+            await get_client(force_login=True)
             return await fn(*args, **kwargs)
 
         raise
@@ -172,7 +208,7 @@ async def root():
     return {
         "status": "ok",
         "addon": "PikPak Stremio Addon",
-        "manifest": "/manifest.json"
+        "manifest": "/manifest.json",
     }
 
 # -----------------------
@@ -191,10 +227,10 @@ async def manifest():
             {
                 "type": "movie",
                 "id": "pikpak",
-                "name": "My PikPak Files"
+                "name": "My PikPak Files",
             }
         ],
-        "idPrefixes": ["tt", "pikpak"]
+        "idPrefixes": ["tt", "pikpak"],
     }
 
 # -----------------------
@@ -223,7 +259,7 @@ async def catalog(type: str, id: str):
             "id": f"pikpak:{file_id}",
             "type": "movie",
             "name": name,
-            "poster": "https://upload.wikimedia.org/wikipedia/commons/8/8c/PikPak_logo.png"
+            "poster": "https://upload.wikimedia.org/wikipedia/commons/8/8c/PikPak_logo.png",
         })
 
     return {"metas": metas}
@@ -241,6 +277,7 @@ async def stream(type: str, id: str):
 
         url = get_cached_url(file_id)
         if not url:
+            logging.info(f"[STREAM] Generating URL for file_id={file_id}")
             data = await with_relogin(pk.get_download_url, file_id)
 
             links = data.get("links", {})
@@ -260,7 +297,7 @@ async def stream(type: str, id: str):
             "streams": [{
                 "name": "PikPak",
                 "title": "PikPak Direct",
-                "url": url
+                "url": url,
             }]
         }
 
@@ -295,6 +332,7 @@ async def stream(type: str, id: str):
 
         url = get_cached_url(file_id)
         if not url:
+            logging.info(f"[STREAM] Generating URL for file_id={file_id}")
             data = await with_relogin(pk.get_download_url, file_id)
 
             links = data.get("links", {})
@@ -313,7 +351,7 @@ async def stream(type: str, id: str):
         streams.append({
             "name": "PikPak",
             "title": name,
-            "url": url
+            "url": url,
         })
 
     return {"streams": streams}
