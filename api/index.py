@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import re
 import json
+import time
 import requests
 from upstash_redis import Redis
 
@@ -57,20 +58,28 @@ def load_auth():
         raw = redis.get("pikpak:auth")
         if not raw:
             return None
+
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+
         return json.loads(raw)
-    except:
+    except Exception as e:
+        print("[REDIS] load_auth failed:", e)
         return None
 
 
-def save_auth(auth):
+def save_auth(auth: dict):
     try:
         redis.set(
             "pikpak:auth",
-            json.dumps(auth),
+            json.dumps(dict(auth)),  # COPY is important
             ex=AUTH_CACHE_TTL
         )
-    except:
-        pass
+        print("[REDIS] auth saved")
+    except Exception as e:
+        print("[REDIS] save_auth failed:", e)
 
 # -----------------------
 # Utils
@@ -95,8 +104,11 @@ client = None
 
 async def get_client(force_login=False):
     """
-    Auth flow:
-    restore → access token → refresh token → email login
+    Auth priority:
+    1) Redis restore
+    2) Access token
+    3) Refresh token
+    4) Email login
     """
     global client
     from pikpakapi import PikPakApi
@@ -118,27 +130,35 @@ async def get_client(force_login=False):
         print("[AUTH] restored auth from redis")
         client.auth = auth
 
-        # 1️⃣ Access token path
+        # Access token check
         try:
             await client.user_info()
-            print("[AUTH] token login (access token valid)")
-            save_auth(client.auth)   # refresh TTL
+            print("[AUTH] access token valid")
+            save_auth(client.auth)
             return client
         except Exception:
             print("[AUTH] access token invalid")
 
-        # 2️⃣ Refresh token path
+        # Refresh token check
         try:
+            print("[AUTH] trying refresh token")
             await client.refresh_access_token()
-            print("[AUTH] token login (refresh token used)")
+            print("[AUTH] refresh token success")
             save_auth(client.auth)
             return client
-        except Exception:
-            print("[AUTH] refresh token failed")
+        except Exception as e:
+            print("[AUTH] refresh token failed:", e)
 
     # ---------- Email login ----------
     print("[AUTH] EMAIL LOGIN triggered")
     await client.login()
+
+    print("[AUTH DEBUG]", {
+        "has_access": bool(client.auth.get("access_token")),
+        "has_refresh": bool(client.auth.get("refresh_token")),
+        "expires": client.auth.get("expires_in"),
+    })
+
     save_auth(client.auth)
     return client
 
@@ -148,16 +168,14 @@ async def with_relogin(fn, *args, **kwargs):
         return await fn(*args, **kwargs)
     except Exception as e:
         msg = str(e).lower()
-
         if "401" in msg or "unauthorized" in msg:
-            print("[AUTH] 401 → force email login")
+            print("[AUTH] 401 → force relogin")
             await get_client(force_login=True)
             return await fn(*args, **kwargs)
-
         raise
 
 # -----------------------
-# Recursive file traversal
+# Recursive traversal
 # -----------------------
 async def collect_files(pk, parent_id="", result=None):
     if result is None:
@@ -192,9 +210,9 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.5.1",
+        "version": "1.5.2",
         "name": "PikPak Cloud",
-        "description": "PikPak Stremio addon (auth debug enabled)",
+        "description": "PikPak Stremio addon (stable auth)",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
         "catalogs": [{
@@ -214,7 +232,7 @@ async def catalog(type: str, id: str):
         return {"metas": []}
 
     pk = await get_client()
-    files = await collect_files(pk, parent_id="")
+    files = await collect_files(pk)
 
     metas = []
     for f in files:
@@ -269,7 +287,7 @@ async def stream(type: str, id: str):
             "url": url
         }]}
 
-    # IMDb movie page
+    # IMDb lookup
     if type != "movie":
         return {"streams": []}
 
@@ -277,7 +295,7 @@ async def stream(type: str, id: str):
     movie_n = normalize(movie_title)
 
     pk = await get_client()
-    files = await collect_files(pk, parent_id="")
+    files = await collect_files(pk)
 
     streams = []
 
