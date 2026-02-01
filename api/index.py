@@ -2,7 +2,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import re
-import json
 import requests
 from upstash_redis import Redis
 
@@ -24,8 +23,8 @@ app.add_middleware(
 # -----------------------
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
 
-URL_CACHE_TTL = 60 * 60 * 24          # 24h
-AUTH_CACHE_TTL = 60 * 60 * 24 * 365   # 1 year
+URL_CACHE_TTL = 60 * 60 * 24       # 24h stream URL cache
+AUTH_CACHE_TTL = 60 * 60 * 24 * 365  # 365 days auth cache
 
 # -----------------------
 # Redis
@@ -54,17 +53,14 @@ def set_cached_url(file_id: str, url: str):
 
 def load_auth():
     try:
-        val = redis.get("pikpak:auth")
-        if not val:
-            return None
-        return json.loads(val)
+        return redis.get("pikpak:auth")
     except:
         return None
 
 
 def save_auth(auth: dict):
     try:
-        redis.set("pikpak:auth", json.dumps(auth), ex=AUTH_CACHE_TTL)
+        redis.set("pikpak:auth", auth, ex=AUTH_CACHE_TTL)
     except:
         pass
 
@@ -83,9 +79,8 @@ def get_movie_info(imdb_id: str):
     meta = r.json().get("meta", {})
     return meta.get("name", ""), str(meta.get("year", ""))
 
-
 # -----------------------
-# PikPak client (FIXED)
+# PikPak client with refresh token
 # -----------------------
 client = None
 
@@ -94,9 +89,9 @@ async def get_client(force_login=False):
     """
     Auth order:
     1. Restore auth from Redis
-    2. Validate access token
+    2. Validate
     3. Refresh token
-    4. Full login
+    4. Full login (last resort)
     """
     global client
     from pikpakapi import PikPakApi
@@ -118,18 +113,11 @@ async def get_client(force_login=False):
     if auth and not force_login:
         client.auth = auth
 
-        # 🔑 CRITICAL FIX (rehydrate internal state)
-        client.access_token = auth.get("access_token")
-        client.refresh_token = auth.get("refresh_token")
-        client.user_id = auth.get("user_id")
-        client.device_id = auth.get("device_id")
-        client._init_headers()
-
         # 1) Try using access token
         try:
             await client.user_info()
             return client
-        except:
+        except Exception:
             pass
 
         # 2) Try refresh token
@@ -137,7 +125,7 @@ async def get_client(force_login=False):
             await client.refresh_access_token()
             save_auth(client.auth)
             return client
-        except:
+        except Exception:
             pass
 
     # ---------- Full login fallback ----------
@@ -151,11 +139,12 @@ async def with_relogin(fn, *args, **kwargs):
         return await fn(*args, **kwargs)
     except Exception as e:
         msg = str(e).lower()
+
         if "401" in msg or "unauthorized" in msg:
             pk = await get_client(force_login=True)
             return await fn(*args, **kwargs)
-        raise
 
+        raise
 
 # -----------------------
 # File traversal
@@ -175,7 +164,6 @@ async def collect_files(pk, parent_id="", result=None):
 
     return result
 
-
 # -----------------------
 # Routes
 # -----------------------
@@ -187,7 +175,6 @@ async def root():
         "manifest": "/manifest.json"
     }
 
-
 # -----------------------
 # Manifest
 # -----------------------
@@ -195,9 +182,9 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.4.1",
+        "version": "1.4.0",
         "name": "PikPak Cloud",
-        "description": "PikPak Stremio addon with refresh-token auth (fixed)",
+        "description": "PikPak Stremio addon with refresh-token auth",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
         "catalogs": [
@@ -209,7 +196,6 @@ async def manifest():
         ],
         "idPrefixes": ["tt", "pikpak"]
     }
-
 
 # -----------------------
 # Catalog
@@ -229,6 +215,7 @@ async def catalog(type: str, id: str):
 
         if not name or not file_id:
             continue
+
         if not name.lower().endswith(VIDEO_EXT):
             continue
 
@@ -240,7 +227,6 @@ async def catalog(type: str, id: str):
         })
 
     return {"metas": metas}
-
 
 # -----------------------
 # Stream
@@ -296,11 +282,15 @@ async def stream(type: str, id: str):
 
         if not name or not file_id:
             continue
+
         if not name.lower().endswith(VIDEO_EXT):
             continue
 
         file_n = normalize(name)
+
         if movie_n not in file_n:
+            continue
+        if movie_year and movie_year not in file_n:
             continue
 
         url = get_cached_url(file_id)
