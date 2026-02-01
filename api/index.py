@@ -8,7 +8,7 @@ import logging
 from upstash_redis import Redis
 
 # -----------------------
-# Logging (Vercel compatible)
+# Logging (Vercel)
 # -----------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -33,11 +33,11 @@ app.add_middleware(
 # -----------------------
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
 
-URL_CACHE_TTL = 60 * 60 * 24           # 24 hours
-AUTH_CACHE_TTL = 60 * 60 * 24 * 365    # 365 days
+URL_CACHE_TTL = 60 * 60 * 24            # 24h
+AUTH_CACHE_TTL = 60 * 60 * 24 * 365     # 365 days
 
 # -----------------------
-# Redis
+# Redis (Upstash)
 # -----------------------
 redis = Redis(
     url=os.environ.get("UPSTASH_REDIS_REST_URL"),
@@ -57,24 +57,39 @@ def get_cached_url(file_id: str):
 
 def set_cached_url(file_id: str, url: str):
     try:
-        redis.set(f"pikpak:url:{file_id}", url, ex=URL_CACHE_TTL)
+        redis.set(
+            f"pikpak:url:{file_id}",
+            url,
+            ex=URL_CACHE_TTL,
+        )
     except Exception as e:
         logging.warning(f"[REDIS] set_cached_url error: {e}")
 
 
+def save_auth(auth: dict):
+    try:
+        redis.set(
+            "pikpak:auth",
+            json.dumps(auth),   # ✅ serialize
+            ex=AUTH_CACHE_TTL,
+        )
+    except Exception as e:
+        logging.warning(f"[REDIS] save_auth error: {e}")
+
+
 def load_auth():
     try:
-        return redis.get("pikpak:auth")
+        raw = redis.get("pikpak:auth")
+        if not raw:
+            return None
+
+        if isinstance(raw, str):
+            return json.loads(raw)   # ✅ deserialize
+
+        return raw
     except Exception as e:
         logging.warning(f"[REDIS] load_auth error: {e}")
         return None
-
-
-def save_auth(auth: dict):
-    try:
-        redis.set("pikpak:auth", auth, ex=AUTH_CACHE_TTL)
-    except Exception as e:
-        logging.warning(f"[REDIS] save_auth error: {e}")
 
 # -----------------------
 # Utils
@@ -92,9 +107,9 @@ def get_movie_info(imdb_id: str):
     return meta.get("name", ""), str(meta.get("year", ""))
 
 
-def log_auth_state(stage: str, auth: dict | None):
-    if not auth:
-        logging.info(f"[AUTH] {stage} | auth=None")
+def log_auth_state(stage: str, auth):
+    if not isinstance(auth, dict):
+        logging.info(f"[AUTH] {stage} | auth_invalid_type={type(auth)}")
         return
 
     safe = {
@@ -133,6 +148,7 @@ async def get_client(force_login=False):
         return client
 
     client = PikPakApi(EMAIL, PASSWORD)
+
     auth = load_auth()
 
     # ---------- Restore auth ----------
@@ -218,7 +234,7 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.4.0",
+        "version": "1.4.1",
         "name": "PikPak Cloud",
         "description": "PikPak Stremio addon with refresh-token auth",
         "types": ["movie"],
