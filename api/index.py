@@ -2,13 +2,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import re
-import requests
 import json
 import logging
+import requests
 from upstash_redis import Redis
 
 # -----------------------
-# Logging (Vercel)
+# Logging (Vercel-safe)
 # -----------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -33,8 +33,8 @@ app.add_middleware(
 # -----------------------
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
 
-URL_CACHE_TTL = 60 * 60 * 24            # 24h
-AUTH_CACHE_TTL = 60 * 60 * 24 * 365     # 365 days
+URL_CACHE_TTL = 60 * 60 * 24              # 24h
+AUTH_CACHE_TTL = 60 * 60 * 24 * 365       # 365 days
 
 # -----------------------
 # Redis (Upstash)
@@ -70,9 +70,10 @@ def save_auth(auth: dict):
     try:
         redis.set(
             "pikpak:auth",
-            json.dumps(auth),   # ✅ serialize
-            ex=AUTH_CACHE_TTL,
+            json.dumps(auth),     # ✅ JSON serialize
+            ex=AUTH_CACHE_TTL,    # ✅ refresh TTL every time
         )
+        logging.info("[AUTH] Auth saved to Redis")
     except Exception as e:
         logging.warning(f"[REDIS] save_auth error: {e}")
 
@@ -82,10 +83,8 @@ def load_auth():
         raw = redis.get("pikpak:auth")
         if not raw:
             return None
-
         if isinstance(raw, str):
-            return json.loads(raw)   # ✅ deserialize
-
+            return json.loads(raw)
         return raw
     except Exception as e:
         logging.warning(f"[REDIS] load_auth error: {e}")
@@ -109,7 +108,7 @@ def get_movie_info(imdb_id: str):
 
 def log_auth_state(stage: str, auth):
     if not isinstance(auth, dict):
-        logging.info(f"[AUTH] {stage} | auth_invalid_type={type(auth)}")
+        logging.info(f"[AUTH] {stage} | invalid_auth_type={type(auth)}")
         return
 
     safe = {
@@ -127,11 +126,12 @@ def log_auth_state(stage: str, auth):
 client = None
 
 
-async def get_client(force_login=False):
+async def get_client(force_login: bool = False):
     """
-    Auth order:
-    1. Restore auth from Redis
+    Auth flow (FIXED):
+    1. Load auth from Redis
     2. Validate access token
+       -> ALWAYS re-save auth (refresh TTL)
     3. Refresh token
     4. Full login (last resort)
     """
@@ -157,15 +157,20 @@ async def get_client(force_login=False):
         logging.info("[AUTH] Loaded auth from Redis")
         log_auth_state("restore", auth)
 
-        # 1️⃣ Access token
+        # 1️⃣ Validate access token
         try:
             await client.user_info()
             logging.info("[AUTH] Access token valid")
+
+            # 🔥 MISSING PIECE (NOW FIXED)
+            # Always re-save auth to refresh TTL / persistence
+            save_auth(client.auth)
+
             return client
         except Exception as e:
             logging.warning(f"[AUTH] Access token failed: {e}")
 
-        # 2️⃣ Refresh token
+        # 2️⃣ Try refresh token
         try:
             await client.refresh_access_token()
             save_auth(client.auth)
@@ -192,7 +197,7 @@ async def with_relogin(fn, *args, **kwargs):
         logging.warning(f"[AUTH] API error: {e}")
 
         if "401" in msg or "unauthorized" in msg:
-            logging.warning("[AUTH] 401 detected → force re-login")
+            logging.warning("[AUTH] 401 detected → force login")
             await get_client(force_login=True)
             return await fn(*args, **kwargs)
 
@@ -234,18 +239,16 @@ async def root():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.4.1",
+        "version": "1.4.2",
         "name": "PikPak Cloud",
-        "description": "PikPak Stremio addon with refresh-token auth",
+        "description": "PikPak Stremio addon with persistent Redis auth",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
-        "catalogs": [
-            {
-                "type": "movie",
-                "id": "pikpak",
-                "name": "My PikPak Files",
-            }
-        ],
+        "catalogs": [{
+            "type": "movie",
+            "id": "pikpak",
+            "name": "My PikPak Files",
+        }],
         "idPrefixes": ["tt", "pikpak"],
     }
 
@@ -267,7 +270,6 @@ async def catalog(type: str, id: str):
 
         if not name or not file_id:
             continue
-
         if not name.lower().endswith(VIDEO_EXT):
             continue
 
@@ -286,7 +288,6 @@ async def catalog(type: str, id: str):
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
 
-    # Direct catalog playback
     if id.startswith("pikpak:"):
         file_id = id.replace("pikpak:", "")
         pk = await get_client()
@@ -309,65 +310,10 @@ async def stream(type: str, id: str):
 
             set_cached_url(file_id, url)
 
-        return {
-            "streams": [{
-                "name": "PikPak",
-                "title": "PikPak Direct",
-                "url": url,
-            }]
-        }
-
-    # IMDb matching
-    if type != "movie":
-        return {"streams": []}
-
-    movie_title, movie_year = get_movie_info(id)
-    movie_n = normalize(movie_title)
-
-    pk = await get_client()
-    files = await collect_files(pk)
-
-    streams = []
-
-    for f in files:
-        name = f.get("name")
-        file_id = f.get("id")
-
-        if not name or not file_id:
-            continue
-
-        if not name.lower().endswith(VIDEO_EXT):
-            continue
-
-        file_n = normalize(name)
-
-        if movie_n not in file_n:
-            continue
-        if movie_year and movie_year not in file_n:
-            continue
-
-        url = get_cached_url(file_id)
-        if not url:
-            logging.info(f"[STREAM] Generating URL for file_id={file_id}")
-            data = await with_relogin(pk.get_download_url, file_id)
-
-            links = data.get("links", {})
-            if "application/octet-stream" in links:
-                url = links["application/octet-stream"]["url"]
-            else:
-                medias = data.get("medias", [])
-                if medias:
-                    url = medias[0]["link"]["url"]
-
-            if not url:
-                continue
-
-            set_cached_url(file_id, url)
-
-        streams.append({
+        return {"streams": [{
             "name": "PikPak",
-            "title": name,
+            "title": "PikPak Direct",
             "url": url,
-        })
+        }]}
 
-    return {"streams": streams}
+    return {"streams": []}
