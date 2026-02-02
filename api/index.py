@@ -41,32 +41,12 @@ redis = Redis(url=REDIS_URL, token=REDIS_TOKEN)
 # -----------------------
 # Redis helpers
 # -----------------------
-async def get_cached_url(file_id: str):
-    try:
-        return await redis.get(f"pikpak:url:{file_id}")
-    except Exception as e:
-        print("❌ Redis get_cached_url:", e)
-        return None
-
-
-async def set_cached_url(file_id: str, url: str):
-    try:
-        await redis.set(f"pikpak:url:{file_id}", url, ex=URL_CACHE_TTL)
-    except Exception as e:
-        print("❌ Redis set_cached_url:", e)
-
-
 async def load_auth():
     try:
         raw = await redis.get("pikpak:auth")
         print("🔎 Redis raw auth:", raw)
-
         if not raw:
             return None
-
-        if isinstance(raw, dict):
-            return raw
-
         return json.loads(raw)
     except Exception as e:
         print("❌ Redis load_auth error:", e)
@@ -77,12 +57,26 @@ async def save_auth(auth):
     try:
         await redis.set(
             "pikpak:auth",
-            json.dumps(auth, default=str),
+            json.dumps(auth),
             ex=AUTH_CACHE_TTL
         )
         print("✅ Auth saved to Redis")
     except Exception as e:
         print("❌ Redis save_auth error:", e)
+
+
+async def get_cached_url(file_id: str):
+    try:
+        return await redis.get(f"pikpak:url:{file_id}")
+    except:
+        return None
+
+
+async def set_cached_url(file_id: str, url: str):
+    try:
+        await redis.set(f"pikpak:url:{file_id}", url, ex=URL_CACHE_TTL)
+    except:
+        pass
 
 # -----------------------
 # Utils
@@ -100,15 +94,30 @@ def get_movie_info(imdb_id: str):
     return meta.get("name", ""), str(meta.get("year", ""))
 
 # -----------------------
+# PikPak auth export/import (🔥 KEY FIX 🔥)
+# -----------------------
+def export_auth(client):
+    return {
+        "access_token": client._access_token,
+        "refresh_token": client._refresh_token,
+        "user_id": getattr(client, "user_id", None),
+        "device_id": getattr(client, "device_id", None),
+    }
+
+
+def import_auth(client, auth):
+    client._access_token = auth.get("access_token")
+    client._refresh_token = auth.get("refresh_token")
+    client.user_id = auth.get("user_id")
+    client.device_id = auth.get("device_id")
+
+# -----------------------
 # PikPak client
 # -----------------------
 client = None
 
 
 async def get_client(force_login=False):
-    """
-    restore → validate → login → refresh → offline_list
-    """
     global client
     from pikpakapi import PikPakApi
 
@@ -118,9 +127,6 @@ async def get_client(force_login=False):
     if not EMAIL or not PASSWORD:
         raise RuntimeError("❌ PIKPAK_EMAIL or PIKPAK_PASSWORD missing")
 
-    if client and not force_login:
-        return client
-
     client = PikPakApi(EMAIL, PASSWORD)
     auth = await load_auth()
 
@@ -128,11 +134,10 @@ async def get_client(force_login=False):
     # Restore session
     # -----------------------
     if auth and not force_login:
-        client.auth = auth
+        import_auth(client, auth)
         try:
-            # 🔥 forces token validation
             await client.offline_list()
-            await save_auth(client.auth)
+            await save_auth(export_auth(client))
             print("✅ PikPak session restored")
             return client
         except Exception as e:
@@ -142,12 +147,10 @@ async def get_client(force_login=False):
     # Full login (REQUIRED FLOW)
     # -----------------------
     await client.login()
-
-    # 🔥 These two lines are CRITICAL
     await client.refresh_access_token()
     await client.offline_list()
 
-    await save_auth(client.auth)
+    await save_auth(export_auth(client))
     print("🔐 Full login + auth finalized")
 
     return client
@@ -205,7 +208,7 @@ async def debug_redis():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.6.0",
+        "version": "1.7.0",
         "name": "PikPak Cloud",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
