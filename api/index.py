@@ -5,6 +5,7 @@ import re
 import json
 import requests
 from upstash_redis.asyncio import Redis
+from pikpakapi import PikPakApi
 
 # -----------------------
 # App
@@ -23,60 +24,45 @@ app.add_middleware(
 # Constants
 # -----------------------
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
-
-URL_CACHE_TTL = 60 * 60 * 24          # 24h
-AUTH_CACHE_TTL = 60 * 60 * 24 * 365   # 365 days
+SESSION_TTL = 60 * 60 * 24 * 365   # 1 year
+URL_CACHE_TTL = 60 * 60 * 24       # 24h
 
 # -----------------------
 # Redis (ASYNC)
 # -----------------------
-REDIS_URL = os.environ.get("UPSTASH_REDIS_REST_URL")
-REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
-
-if not REDIS_URL or not REDIS_TOKEN:
-    raise RuntimeError("❌ Upstash Redis env vars missing")
-
-redis = Redis(url=REDIS_URL, token=REDIS_TOKEN)
+redis = Redis(
+    url=os.environ["UPSTASH_REDIS_REST_URL"],
+    token=os.environ["UPSTASH_REDIS_REST_TOKEN"],
+)
 
 # -----------------------
 # Redis helpers
 # -----------------------
-async def load_auth():
-    try:
-        raw = await redis.get("pikpak:auth")
-        print("🔎 Redis raw auth:", raw)
-        if not raw:
-            return None
-        return json.loads(raw)
-    except Exception as e:
-        print("❌ Redis load_auth error:", e)
+async def save_session(client: PikPakApi):
+    data = client.to_dict()
+    await redis.set(
+        "pikpak:session",
+        json.dumps(data),
+        ex=SESSION_TTL,
+    )
+    print("✅ Session saved to Redis")
+
+
+async def load_session():
+    raw = await redis.get("pikpak:session")
+    if not raw:
+        print("ℹ️ No session in Redis")
         return None
-
-
-async def save_auth(auth):
-    try:
-        await redis.set(
-            "pikpak:auth",
-            json.dumps(auth),
-            ex=AUTH_CACHE_TTL
-        )
-        print("✅ Auth saved to Redis")
-    except Exception as e:
-        print("❌ Redis save_auth error:", e)
+    print("✅ Session loaded from Redis")
+    return PikPakApi.from_dict(json.loads(raw))
 
 
 async def get_cached_url(file_id: str):
-    try:
-        return await redis.get(f"pikpak:url:{file_id}")
-    except:
-        return None
+    return await redis.get(f"pikpak:url:{file_id}")
 
 
 async def set_cached_url(file_id: str, url: str):
-    try:
-        await redis.set(f"pikpak:url:{file_id}", url, ex=URL_CACHE_TTL)
-    except:
-        pass
+    await redis.set(f"pikpak:url:{file_id}", url, ex=URL_CACHE_TTL)
 
 # -----------------------
 # Utils
@@ -94,65 +80,45 @@ def get_movie_info(imdb_id: str):
     return meta.get("name", ""), str(meta.get("year", ""))
 
 # -----------------------
-# PikPak auth export/import (🔥 KEY FIX 🔥)
+# PikPak client manager
 # -----------------------
-def export_auth(client):
-    return {
-        "access_token": client._access_token,
-        "refresh_token": client._refresh_token,
-        "user_id": getattr(client, "user_id", None),
-        "device_id": getattr(client, "device_id", None),
-    }
-
-
-def import_auth(client, auth):
-    client._access_token = auth.get("access_token")
-    client._refresh_token = auth.get("refresh_token")
-    client.user_id = auth.get("user_id")
-    client.device_id = auth.get("device_id")
-
-# -----------------------
-# PikPak client
-# -----------------------
-client = None
+client: PikPakApi | None = None
 
 
 async def get_client(force_login=False):
     global client
-    from pikpakapi import PikPakApi
 
-    EMAIL = os.environ.get("PIKPAK_EMAIL")
-    PASSWORD = os.environ.get("PIKPAK_PASSWORD")
-
-    if not EMAIL or not PASSWORD:
-        raise RuntimeError("❌ PIKPAK_EMAIL or PIKPAK_PASSWORD missing")
-
-    client = PikPakApi(EMAIL, PASSWORD)
-    auth = await load_auth()
+    if client and not force_login:
+        return client
 
     # -----------------------
-    # Restore session
+    # Try restore session
     # -----------------------
-    if auth and not force_login:
-        import_auth(client, auth)
-        try:
-            await client.offline_list()
-            await save_auth(export_auth(client))
-            print("✅ PikPak session restored")
-            return client
-        except Exception as e:
-            print("⚠️ Restore failed:", e)
+    if not force_login:
+        restored = await load_session()
+        if restored:
+            try:
+                await restored.refresh_access_token()
+                client = restored
+                await save_session(client)
+                print("✅ PikPak session restored")
+                return client
+            except Exception as e:
+                print("⚠️ Session restore failed:", e)
 
     # -----------------------
-    # Full login (REQUIRED FLOW)
+    # Full login
     # -----------------------
+    client = PikPakApi(
+        username=os.environ["PIKPAK_EMAIL"],
+        password=os.environ["PIKPAK_PASSWORD"],
+    )
+
     await client.login()
     await client.refresh_access_token()
-    await client.offline_list()
+    await save_session(client)
 
-    await save_auth(export_auth(client))
-    print("🔐 Full login + auth finalized")
-
+    print("🔐 Full login completed")
     return client
 
 
@@ -161,7 +127,6 @@ async def with_relogin(fn, *args, **kwargs):
         return await fn(*args, **kwargs)
     except Exception as e:
         if "401" in str(e).lower():
-            print("🔁 Re-login triggered")
             await get_client(force_login=True)
             return await fn(*args, **kwargs)
         raise
@@ -174,7 +139,6 @@ async def collect_files(pk, parent_id="", result=None):
         result = []
 
     data = await with_relogin(pk.file_list, parent_id=parent_id)
-
     for f in data.get("files", []):
         if f.get("kind") == "drive#folder":
             await collect_files(pk, f["id"], result)
@@ -191,14 +155,12 @@ async def root():
     return {"status": "ok"}
 
 # -----------------------
-# Debug Redis
+# Debug
 # -----------------------
-@app.get("/debug/redis")
-async def debug_redis():
-    await redis.set("test:key", "hello", ex=60)
+@app.get("/debug/session")
+async def debug_session():
     return {
-        "read": await redis.get("test:key"),
-        "auth_present": bool(await redis.get("pikpak:auth"))
+        "session_exists": bool(await redis.get("pikpak:session"))
     }
 
 # -----------------------
@@ -208,7 +170,7 @@ async def debug_redis():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.7.0",
+        "version": "2.0.0",
         "name": "PikPak Cloud",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
@@ -234,11 +196,10 @@ async def catalog(type: str, id: str):
     metas = []
     for f in files:
         name = f.get("name")
-        file_id = f.get("id")
-
-        if name and file_id and name.lower().endswith(VIDEO_EXT):
+        fid = f.get("id")
+        if name and fid and name.lower().endswith(VIDEO_EXT):
             metas.append({
-                "id": f"pikpak:{file_id}",
+                "id": f"pikpak:{fid}",
                 "type": "movie",
                 "name": name,
                 "poster": "https://upload.wikimedia.org/wikipedia/commons/8/8c/PikPak_logo.png"
@@ -251,7 +212,6 @@ async def catalog(type: str, id: str):
 # -----------------------
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
-
     if not id.startswith("pikpak:"):
         return {"streams": []}
 
@@ -262,7 +222,6 @@ async def stream(type: str, id: str):
     if not url:
         data = await with_relogin(pk.get_download_url, file_id)
         links = data.get("links", {})
-
         if "application/octet-stream" in links:
             url = links["application/octet-stream"]["url"]
         else:
