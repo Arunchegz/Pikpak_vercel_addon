@@ -4,7 +4,7 @@ import os
 import re
 import json
 import requests
-from upstash_redis.asyncio import Redis   # ✅ ASYNC CLIENT
+from upstash_redis.asyncio import Redis
 
 # -----------------------
 # App
@@ -39,7 +39,7 @@ if not REDIS_URL or not REDIS_TOKEN:
 redis = Redis(url=REDIS_URL, token=REDIS_TOKEN)
 
 # -----------------------
-# Redis helpers (ASYNC)
+# Redis helpers
 # -----------------------
 async def get_cached_url(file_id: str):
     try:
@@ -107,7 +107,7 @@ client = None
 
 async def get_client(force_login=False):
     """
-    restore → validate → refresh → login
+    restore → validate → login → refresh → offline_list
     """
     global client
     from pikpakapi import PikPakApi
@@ -129,29 +129,27 @@ async def get_client(force_login=False):
     # -----------------------
     if auth and not force_login:
         client.auth = auth
-
         try:
-            await client.user_info()
+            # 🔥 forces token validation
+            await client.offline_list()
             await save_auth(client.auth)
             print("✅ PikPak session restored")
             return client
         except Exception as e:
-            print("⚠️ Session invalid:", e)
-
-        try:
-            await client.refresh_access_token()
-            await save_auth(client.auth)
-            print("♻️ Token refreshed")
-            return client
-        except Exception as e:
-            print("⚠️ Refresh failed:", e)
+            print("⚠️ Restore failed:", e)
 
     # -----------------------
-    # Full login
+    # Full login (REQUIRED FLOW)
     # -----------------------
     await client.login()
+
+    # 🔥 These two lines are CRITICAL
+    await client.refresh_access_token()
+    await client.offline_list()
+
     await save_auth(client.auth)
-    print("🔐 Full login done")
+    print("🔐 Full login + auth finalized")
+
     return client
 
 
@@ -207,7 +205,7 @@ async def debug_redis():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.5.3",
+        "version": "1.6.0",
         "name": "PikPak Cloud",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
