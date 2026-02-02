@@ -4,7 +4,7 @@ import os
 import re
 import json
 import requests
-from upstash_redis import Redis
+from upstash_redis.asyncio import Redis   # ✅ ASYNC CLIENT
 
 # -----------------------
 # App
@@ -28,7 +28,7 @@ URL_CACHE_TTL = 60 * 60 * 24          # 24h
 AUTH_CACHE_TTL = 60 * 60 * 24 * 365   # 365 days
 
 # -----------------------
-# Redis (ASYNC Upstash)
+# Redis (ASYNC)
 # -----------------------
 REDIS_URL = os.environ.get("UPSTASH_REDIS_REST_URL")
 REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
@@ -39,7 +39,7 @@ if not REDIS_URL or not REDIS_TOKEN:
 redis = Redis(url=REDIS_URL, token=REDIS_TOKEN)
 
 # -----------------------
-# Redis helpers (ASYNC!)
+# Redis helpers (ASYNC)
 # -----------------------
 async def get_cached_url(file_id: str):
     try:
@@ -122,7 +122,6 @@ async def get_client(force_login=False):
         return client
 
     client = PikPakApi(EMAIL, PASSWORD)
-
     auth = await load_auth()
 
     # -----------------------
@@ -131,7 +130,6 @@ async def get_client(force_login=False):
     if auth and not force_login:
         client.auth = auth
 
-        # Validate
         try:
             await client.user_info()
             await save_auth(client.auth)
@@ -140,7 +138,6 @@ async def get_client(force_login=False):
         except Exception as e:
             print("⚠️ Session invalid:", e)
 
-        # Refresh
         try:
             await client.refresh_access_token()
             await save_auth(client.auth)
@@ -193,7 +190,7 @@ async def root():
     return {"status": "ok"}
 
 # -----------------------
-# Debug Redis (IMPORTANT)
+# Debug Redis
 # -----------------------
 @app.get("/debug/redis")
 async def debug_redis():
@@ -210,7 +207,7 @@ async def debug_redis():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.5.2",
+        "version": "1.5.3",
         "name": "PikPak Cloud",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
