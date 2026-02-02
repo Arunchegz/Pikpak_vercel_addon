@@ -28,7 +28,7 @@ URL_CACHE_TTL = 60 * 60 * 24          # 24h
 AUTH_CACHE_TTL = 60 * 60 * 24 * 365   # 365 days
 
 # -----------------------
-# Redis (with hard checks)
+# Redis (ASYNC Upstash)
 # -----------------------
 REDIS_URL = os.environ.get("UPSTASH_REDIS_REST_URL")
 REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
@@ -39,32 +39,31 @@ if not REDIS_URL or not REDIS_TOKEN:
 redis = Redis(url=REDIS_URL, token=REDIS_TOKEN)
 
 # -----------------------
-# Redis helpers
+# Redis helpers (ASYNC!)
 # -----------------------
-def get_cached_url(file_id: str):
+async def get_cached_url(file_id: str):
     try:
-        return redis.get(f"pikpak:url:{file_id}")
+        return await redis.get(f"pikpak:url:{file_id}")
     except Exception as e:
         print("❌ Redis get_cached_url:", e)
         return None
 
 
-def set_cached_url(file_id: str, url: str):
+async def set_cached_url(file_id: str, url: str):
     try:
-        redis.set(f"pikpak:url:{file_id}", url, ex=URL_CACHE_TTL)
+        await redis.set(f"pikpak:url:{file_id}", url, ex=URL_CACHE_TTL)
     except Exception as e:
         print("❌ Redis set_cached_url:", e)
 
 
-def load_auth():
+async def load_auth():
     try:
-        raw = redis.get("pikpak:auth")
+        raw = await redis.get("pikpak:auth")
         print("🔎 Redis raw auth:", raw)
 
         if not raw:
             return None
 
-        # upstash may already return dict
         if isinstance(raw, dict):
             return raw
 
@@ -74,9 +73,9 @@ def load_auth():
         return None
 
 
-def save_auth(auth):
+async def save_auth(auth):
     try:
-        redis.set(
+        await redis.set(
             "pikpak:auth",
             json.dumps(auth, default=str),
             ex=AUTH_CACHE_TTL
@@ -123,7 +122,8 @@ async def get_client(force_login=False):
         return client
 
     client = PikPakApi(EMAIL, PASSWORD)
-    auth = load_auth()
+
+    auth = await load_auth()
 
     # -----------------------
     # Restore session
@@ -134,7 +134,7 @@ async def get_client(force_login=False):
         # Validate
         try:
             await client.user_info()
-            save_auth(client.auth)
+            await save_auth(client.auth)
             print("✅ PikPak session restored")
             return client
         except Exception as e:
@@ -143,7 +143,7 @@ async def get_client(force_login=False):
         # Refresh
         try:
             await client.refresh_access_token()
-            save_auth(client.auth)
+            await save_auth(client.auth)
             print("♻️ Token refreshed")
             return client
         except Exception as e:
@@ -153,7 +153,7 @@ async def get_client(force_login=False):
     # Full login
     # -----------------------
     await client.login()
-    save_auth(client.auth)
+    await save_auth(client.auth)
     print("🔐 Full login done")
     return client
 
@@ -176,6 +176,7 @@ async def collect_files(pk, parent_id="", result=None):
         result = []
 
     data = await with_relogin(pk.file_list, parent_id=parent_id)
+
     for f in data.get("files", []):
         if f.get("kind") == "drive#folder":
             await collect_files(pk, f["id"], result)
@@ -192,15 +193,14 @@ async def root():
     return {"status": "ok"}
 
 # -----------------------
-# Debug Redis
+# Debug Redis (IMPORTANT)
 # -----------------------
 @app.get("/debug/redis")
-def debug_redis():
-    redis.set("test:key", "hello", ex=60)
+async def debug_redis():
+    await redis.set("test:key", "hello", ex=60)
     return {
-        "write": True,
-        "read": redis.get("test:key"),
-        "auth_present": bool(redis.get("pikpak:auth"))
+        "read": await redis.get("test:key"),
+        "auth_present": bool(await redis.get("pikpak:auth"))
     }
 
 # -----------------------
@@ -210,7 +210,7 @@ def debug_redis():
 async def manifest():
     return {
         "id": "com.arun.pikpak",
-        "version": "1.5.1",
+        "version": "1.5.2",
         "name": "PikPak Cloud",
         "types": ["movie"],
         "resources": ["catalog", "stream"],
@@ -253,13 +253,14 @@ async def catalog(type: str, id: str):
 # -----------------------
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
+
     if not id.startswith("pikpak:"):
         return {"streams": []}
 
     file_id = id.replace("pikpak:", "")
     pk = await get_client()
 
-    url = get_cached_url(file_id)
+    url = await get_cached_url(file_id)
     if not url:
         data = await with_relogin(pk.get_download_url, file_id)
         links = data.get("links", {})
@@ -274,7 +275,7 @@ async def stream(type: str, id: str):
         if not url:
             return {"streams": []}
 
-        set_cached_url(file_id, url)
+        await set_cached_url(file_id, url)
 
     return {
         "streams": [{
