@@ -379,7 +379,7 @@ async def manifest():
 
     return {
         "id": "com.arun.pikpak",
-        "version": "3.0.0",
+        "version": "3.1.0",
 
         "name": "PikPak Cloud",
 
@@ -498,10 +498,18 @@ async def series_catalog():
             name
         )
 
+        # Only TV episodes
         if season is None:
             continue
 
         title, _ = extract_title_year(name)
+
+        # Fallback
+        if not title:
+
+            title = name.split(".S")[0]
+
+            title = title.replace(".", " ")
 
         normalized = normalize(title)
 
@@ -509,6 +517,8 @@ async def series_catalog():
             continue
 
         added.add(normalized)
+
+        print("📺 SERIES:", title)
 
         metas.append({
             "id": (
@@ -523,8 +533,14 @@ async def series_catalog():
                 "https://upload.wikimedia.org/"
                 "wikipedia/commons/8/8c/"
                 "PikPak_logo.png"
-            )
+            ),
+
+            "posterShape": "poster",
+
+            "description": title
         })
+
+    print("TOTAL SERIES:", len(metas))
 
     return {
         "metas": metas
@@ -603,6 +619,15 @@ async def meta(type: str, id: str):
                 name
             )
 
+            if not parsed_title:
+
+                parsed_title = name.split(".S")[0]
+
+                parsed_title = parsed_title.replace(
+                    ".",
+                    " "
+                )
+
             normalized = normalize(
                 parsed_title
             )
@@ -673,6 +698,10 @@ async def meta(type: str, id: str):
                     "wikipedia/commons/8/8c/"
                     "PikPak_logo.png"
                 ),
+
+                "posterShape": "poster",
+
+                "description": series_name,
 
                 "videos": videos
             }
@@ -777,6 +806,15 @@ async def stream(type: str, id: str):
             parsed_title, _ = extract_title_year(
                 name
             )
+
+            if not parsed_title:
+
+                parsed_title = name.split(".S")[0]
+
+                parsed_title = parsed_title.replace(
+                    ".",
+                    " "
+                )
 
             season, episode = extract_season_episode(
                 name
