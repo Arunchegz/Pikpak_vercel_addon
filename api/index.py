@@ -4,12 +4,15 @@ import os
 import re
 import json
 import requests
+from urllib.parse import unquote
+
 from upstash_redis.asyncio import Redis
 from pikpakapi import PikPakApi
 
-# -----------------------
+# ---------------------------------------------------
 # App
-# -----------------------
+# ---------------------------------------------------
+
 app = FastAPI()
 
 app.add_middleware(
@@ -20,25 +23,38 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -----------------------
+# ---------------------------------------------------
 # Constants
-# -----------------------
-VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
-SESSION_TTL = 60 * 60 * 24 * 365   # 1 year
-URL_CACHE_TTL = 60 * 60 * 24       # 24h
+# ---------------------------------------------------
 
-# -----------------------
+VIDEO_EXT = (
+    ".mp4",
+    ".mkv",
+    ".avi",
+    ".mov",
+    ".webm",
+    ".flv",
+    ".ts"
+)
+
+SESSION_TTL = 60 * 60 * 24 * 365
+URL_CACHE_TTL = 60 * 60 * 24
+
+# ---------------------------------------------------
 # Redis
-# -----------------------
+# ---------------------------------------------------
+
 redis = Redis(
     url=os.environ["UPSTASH_REDIS_REST_URL"],
     token=os.environ["UPSTASH_REDIS_REST_TOKEN"],
 )
 
-# -----------------------
+# ---------------------------------------------------
 # Redis helpers
-# -----------------------
+# ---------------------------------------------------
+
 async def save_session(client: PikPakApi):
+
     data = client.to_dict()
 
     await redis.set(
@@ -51,6 +67,7 @@ async def save_session(client: PikPakApi):
 
 
 async def load_session():
+
     raw = await redis.get("pikpak:session")
 
     if not raw:
@@ -58,38 +75,161 @@ async def load_session():
         return None
 
     print("✅ Session restored")
-    return PikPakApi.from_dict(json.loads(raw))
+
+    return PikPakApi.from_dict(
+        json.loads(raw)
+    )
 
 
 async def get_cached_url(file_id: str):
-    return await redis.get(f"pikpak:url:{file_id}")
+
+    return await redis.get(
+        f"pikpak:url:{file_id}"
+    )
 
 
-async def set_cached_url(file_id: str, url: str):
+async def set_cached_url(
+    file_id: str,
+    url: str
+):
+
     await redis.set(
         f"pikpak:url:{file_id}",
         url,
         ex=URL_CACHE_TTL,
     )
 
-# -----------------------
-# Utils
-# -----------------------
-def normalize(text: str) -> str:
+# ---------------------------------------------------
+# Helpers
+# ---------------------------------------------------
+
+def normalize(text: str):
+
     text = text.lower()
 
-    # remove symbols
-    text = re.sub(r"[^a-z0-9 ]", " ", text)
+    text = re.sub(
+        r"[^a-z0-9 ]",
+        " ",
+        text
+    )
 
-    # collapse spaces
-    return re.sub(r"\s+", " ", text).strip()
+    return re.sub(
+        r"\s+",
+        " ",
+        text
+    ).strip()
 
 
-def get_movie_info(imdb_id: str):
+def flexible_match(
+    title: str,
+    filename: str
+):
 
-    url = f"https://v3-cinemeta.strem.io/meta/movie/{imdb_id}.json"
+    title_n = normalize(title)
 
-    r = requests.get(url, timeout=10)
+    file_n = normalize(filename)
+
+    words = title_n.split()
+
+    matched = sum(
+        1 for w in words
+        if w in file_n
+    )
+
+    required = max(
+        2,
+        len(words) // 2
+    )
+
+    return matched >= required
+
+
+def extract_title_year(filename: str):
+
+    year_match = re.search(
+        r"(19|20)\d{2}",
+        filename
+    )
+
+    year = (
+        year_match.group(0)
+        if year_match else ""
+    )
+
+    title = re.sub(
+        r"\.(mkv|mp4|avi|mov|webm|wmv|srt).*",
+        "",
+        filename,
+        flags=re.I
+    )
+
+    title = re.sub(
+        r"(19|20)\d{2}",
+        "",
+        title
+    )
+
+    title = re.sub(
+        r"S\d{1,2}E\d{1,2}.*",
+        "",
+        title,
+        flags=re.I
+    )
+
+    title = re.sub(
+        r"\d{1,2}x\d{1,2}.*",
+        "",
+        title,
+        flags=re.I
+    )
+
+    title = title.replace(".", " ")
+
+    title = title.replace("_", " ")
+
+    title = title.strip()
+
+    return title, year
+
+
+def extract_season_episode(filename: str):
+
+    patterns = [
+        r"S(\d{1,2})E(\d{1,2})",
+        r"(\d{1,2})x(\d{1,2})",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            filename,
+            re.I
+        )
+
+        if match:
+            return (
+                int(match.group(1)),
+                int(match.group(2))
+            )
+
+    return None, None
+
+
+def get_cinemeta(
+    type_name: str,
+    imdb_id: str
+):
+
+    url = (
+        "https://v3-cinemeta.strem.io/"
+        f"meta/{type_name}/{imdb_id}.json"
+    )
+
+    r = requests.get(
+        url,
+        timeout=10
+    )
 
     meta = r.json().get("meta", {})
 
@@ -98,25 +238,10 @@ def get_movie_info(imdb_id: str):
         str(meta.get("year", ""))
     )
 
+# ---------------------------------------------------
+# PikPak Client
+# ---------------------------------------------------
 
-def title_match(movie_title: str, filename: str):
-
-    movie_n = normalize(movie_title)
-    file_n = normalize(filename)
-
-    title_words = movie_n.split()
-
-    # Count matching words
-    match_count = sum(1 for w in title_words if w in file_n)
-
-    # Flexible matching
-    required = max(2, len(title_words) // 2)
-
-    return match_count >= required
-
-# -----------------------
-# PikPak client manager
-# -----------------------
 client: PikPakApi | None = None
 
 
@@ -124,35 +249,36 @@ async def get_client(force_login=False):
 
     global client
 
-    # already active
     if client and not force_login:
         return client
 
-    # -----------------------
-    # Try restore session
-    # -----------------------
+    # Restore session
     if not force_login:
 
         restored = await load_session()
 
         if restored:
+
             try:
+
                 await restored.refresh_access_token()
 
                 client = restored
 
                 await save_session(client)
 
-                print("✅ Session refresh successful")
+                print("✅ Session restored")
 
                 return client
 
             except Exception as e:
-                print("⚠️ Session restore failed:", e)
 
-    # -----------------------
+                print(
+                    "⚠️ Session restore failed:",
+                    e
+                )
+
     # Full login
-    # -----------------------
     client = PikPakApi(
         username=os.environ["PIKPAK_EMAIL"],
         password=os.environ["PIKPAK_PASSWORD"],
@@ -169,10 +295,18 @@ async def get_client(force_login=False):
     return client
 
 
-async def with_relogin(fn, *args, **kwargs):
+async def with_relogin(
+    fn,
+    *args,
+    **kwargs
+):
 
     try:
-        return await fn(*args, **kwargs)
+
+        return await fn(
+            *args,
+            **kwargs
+        )
 
     except Exception as e:
 
@@ -180,16 +314,26 @@ async def with_relogin(fn, *args, **kwargs):
 
             print("🔄 Re-login triggered")
 
-            await get_client(force_login=True)
+            await get_client(
+                force_login=True
+            )
 
-            return await fn(*args, **kwargs)
+            return await fn(
+                *args,
+                **kwargs
+            )
 
         raise
 
-# -----------------------
-# Recursive file traversal
-# -----------------------
-async def collect_files(pk, parent_id="", result=None):
+# ---------------------------------------------------
+# Recursive traversal
+# ---------------------------------------------------
+
+async def collect_files(
+    pk,
+    parent_id="",
+    result=None
+):
 
     if result is None:
         result = []
@@ -210,125 +354,76 @@ async def collect_files(pk, parent_id="", result=None):
             )
 
         else:
+
             result.append(f)
 
     return result
 
-# -----------------------
+# ---------------------------------------------------
 # Root
-# -----------------------
+# ---------------------------------------------------
+
 @app.get("/")
 async def root():
+
     return {
         "status": "ok"
     }
 
-# -----------------------
-# Debug
-# -----------------------
-@app.get("/debug/session")
-async def debug_session():
-
-    return {
-        "session_exists": bool(
-            await redis.get("pikpak:session")
-        )
-    }
-
-# -----------------------
+# ---------------------------------------------------
 # Manifest
-# -----------------------
+# ---------------------------------------------------
+
 @app.get("/manifest.json")
 async def manifest():
 
     return {
         "id": "com.arun.pikpak",
-        "version": "2.1.0",
+        "version": "3.0.0",
+
         "name": "PikPak Cloud",
 
-        "types": ["movie"],
+        "description": (
+            "Movies & Series from PikPak"
+        ),
 
-        # IMPORTANT
         "resources": [
             "catalog",
-            "stream",
-            "meta"
+            "meta",
+            "stream"
+        ],
+
+        "types": [
+            "movie",
+            "series"
+        ],
+
+        "idPrefixes": [
+            "tt",
+            "pikpak",
+            "pikpakseries"
         ],
 
         "catalogs": [
             {
                 "type": "movie",
-                "id": "pikpak",
-                "name": "My PikPak Files"
+                "id": "pikpak_movies",
+                "name": "🎬 PikPak Movies"
+            },
+            {
+                "type": "series",
+                "id": "pikpak_series",
+                "name": "📺 PikPak Series"
             }
-        ],
-
-        "idPrefixes": [
-            "tt",
-            "pikpak"
         ]
     }
 
-# -----------------------
-# Meta
-# -----------------------
-@app.get("/meta/{type}/{id}.json")
-async def meta(type: str, id: str):
+# ---------------------------------------------------
+# Movie Catalog
+# ---------------------------------------------------
 
-    if type != "movie":
-        return {"meta": {}}
-
-    # -----------------------
-    # IMDb Discover Items
-    # -----------------------
-    if id.startswith("tt"):
-
-        movie_title, movie_year = get_movie_info(id)
-
-        return {
-            "meta": {
-                "id": id,
-                "type": "movie",
-                "name": movie_title,
-                "year": movie_year,
-                "poster": "https://upload.wikimedia.org/wikipedia/commons/8/8c/PikPak_logo.png"
-            }
-        }
-
-    # -----------------------
-    # Direct PikPak Items
-    # -----------------------
-    if id.startswith("pikpak:"):
-
-        file_id = id.replace("pikpak:", "")
-
-        pk = await get_client()
-
-        files = await collect_files(pk)
-
-        for f in files:
-
-            if f.get("id") == file_id:
-
-                return {
-                    "meta": {
-                        "id": id,
-                        "type": "movie",
-                        "name": f.get("name"),
-                        "poster": "https://upload.wikimedia.org/wikipedia/commons/8/8c/PikPak_logo.png"
-                    }
-                }
-
-    return {"meta": {}}
-
-# -----------------------
-# Catalog
-# -----------------------
-@app.get("/catalog/{type}/{id}.json")
-async def catalog(type: str, id: str):
-
-    if type != "movie" or id != "pikpak":
-        return {"metas": []}
+@app.get("/catalog/movie/pikpak_movies.json")
+async def movie_catalog():
 
     pk = await get_client()
 
@@ -339,6 +434,7 @@ async def catalog(type: str, id: str):
     for f in files:
 
         name = f.get("name")
+
         fid = f.get("id")
 
         if not name or not fid:
@@ -347,33 +443,441 @@ async def catalog(type: str, id: str):
         if not name.lower().endswith(VIDEO_EXT):
             continue
 
+        season, episode = extract_season_episode(
+            name
+        )
+
+        # Skip TV episodes
+        if season is not None:
+            continue
+
         metas.append({
             "id": f"pikpak:{fid}",
+
             "type": "movie",
+
             "name": name,
-            "poster": "https://upload.wikimedia.org/wikipedia/commons/8/8c/PikPak_logo.png"
+
+            "poster": (
+                "https://upload.wikimedia.org/"
+                "wikipedia/commons/8/8c/"
+                "PikPak_logo.png"
+            )
         })
 
     return {
         "metas": metas
     }
 
-# -----------------------
+# ---------------------------------------------------
+# Series Catalog
+# ---------------------------------------------------
+
+@app.get("/catalog/series/pikpak_series.json")
+async def series_catalog():
+
+    pk = await get_client()
+
+    files = await collect_files(pk)
+
+    metas = []
+
+    added = set()
+
+    for f in files:
+
+        name = f.get("name")
+
+        if not name:
+            continue
+
+        if not name.lower().endswith(VIDEO_EXT):
+            continue
+
+        season, episode = extract_season_episode(
+            name
+        )
+
+        if season is None:
+            continue
+
+        title, _ = extract_title_year(name)
+
+        normalized = normalize(title)
+
+        if normalized in added:
+            continue
+
+        added.add(normalized)
+
+        metas.append({
+            "id": (
+                f"pikpakseries:{normalized}"
+            ),
+
+            "type": "series",
+
+            "name": title,
+
+            "poster": (
+                "https://upload.wikimedia.org/"
+                "wikipedia/commons/8/8c/"
+                "PikPak_logo.png"
+            )
+        })
+
+    return {
+        "metas": metas
+    }
+
+# ---------------------------------------------------
+# Meta
+# ---------------------------------------------------
+
+@app.get("/meta/{type}/{id}.json")
+async def meta(type: str, id: str):
+
+    print("META:", type, id)
+
+    # ---------------------------------------------------
+    # IMDb Discover
+    # ---------------------------------------------------
+
+    if id.startswith("tt"):
+
+        title, year = get_cinemeta(
+            type,
+            id
+        )
+
+        return {
+            "meta": {
+                "id": id,
+
+                "type": type,
+
+                "name": title,
+
+                "year": year,
+
+                "poster": (
+                    "https://upload.wikimedia.org/"
+                    "wikipedia/commons/8/8c/"
+                    "PikPak_logo.png"
+                )
+            }
+        }
+
+    pk = await get_client()
+
+    files = await collect_files(pk)
+
+    # ---------------------------------------------------
+    # SERIES META
+    # ---------------------------------------------------
+
+    if type == "series":
+
+        clean_id = id.replace(
+            "pikpakseries:",
+            ""
+        )
+
+        videos = []
+
+        added = set()
+
+        series_name = None
+
+        for f in files:
+
+            name = f.get("name")
+
+            if not name:
+                continue
+
+            if not name.lower().endswith(VIDEO_EXT):
+                continue
+
+            parsed_title, _ = extract_title_year(
+                name
+            )
+
+            normalized = normalize(
+                parsed_title
+            )
+
+            if normalized != normalize(clean_id):
+                continue
+
+            season, episode = extract_season_episode(
+                name
+            )
+
+            if season is None:
+                continue
+
+            key = (
+                f"{season}-{episode}"
+            )
+
+            if key in added:
+                continue
+
+            added.add(key)
+
+            series_name = parsed_title
+
+            videos.append({
+                "id": (
+                    f"pikpakseries:"
+                    f"{normalized}:"
+                    f"{season}:"
+                    f"{episode}"
+                ),
+
+                "title": (
+                    f"S{season:02d}"
+                    f"E{episode:02d}"
+                ),
+
+                "season": season,
+
+                "episode": episode,
+
+                "released": (
+                    "2024-01-01T00:00:00.000Z"
+                )
+            })
+
+        videos.sort(
+            key=lambda x: (
+                x["season"],
+                x["episode"]
+            )
+        )
+
+        return {
+            "meta": {
+                "id": (
+                    f"pikpakseries:"
+                    f"{clean_id}"
+                ),
+
+                "type": "series",
+
+                "name": series_name,
+
+                "poster": (
+                    "https://upload.wikimedia.org/"
+                    "wikipedia/commons/8/8c/"
+                    "PikPak_logo.png"
+                ),
+
+                "videos": videos
+            }
+        }
+
+    # ---------------------------------------------------
+    # MOVIE META
+    # ---------------------------------------------------
+
+    if id.startswith("pikpak:"):
+
+        file_id = id.replace(
+            "pikpak:",
+            ""
+        )
+
+        for f in files:
+
+            if f.get("id") == file_id:
+
+                return {
+                    "meta": {
+                        "id": id,
+
+                        "type": "movie",
+
+                        "name": f.get("name"),
+
+                        "poster": (
+                            "https://upload.wikimedia.org/"
+                            "wikipedia/commons/8/8c/"
+                            "PikPak_logo.png"
+                        )
+                    }
+                }
+
+    return {
+        "meta": {}
+    }
+
+# ---------------------------------------------------
 # Stream
-# -----------------------
+# ---------------------------------------------------
+
 @app.get("/stream/{type}/{id}.json")
 async def stream(type: str, id: str):
 
     pk = await get_client()
 
-    # -----------------------
-    # Direct PikPak File
-    # -----------------------
+    streams = []
+
+    # ---------------------------------------------------
+    # SERIES STREAM
+    # ---------------------------------------------------
+
+    if type == "series":
+
+        decoded_id = unquote(id)
+
+        print(
+            "SERIES STREAM:",
+            decoded_id
+        )
+
+        match = re.match(
+            r"(pikpakseries:[^:]+):(\d+):(\d+)",
+            decoded_id
+        )
+
+        if not match:
+            return {"streams": []}
+
+        series_id = match.group(1)
+
+        target_season = int(
+            match.group(2)
+        )
+
+        target_episode = int(
+            match.group(3)
+        )
+
+        series_title = series_id.replace(
+            "pikpakseries:",
+            ""
+        )
+
+        files = await collect_files(pk)
+
+        for f in files:
+
+            name = f.get("name")
+
+            file_id = f.get("id")
+
+            if not name or not file_id:
+                continue
+
+            if not name.lower().endswith(VIDEO_EXT):
+                continue
+
+            parsed_title, _ = extract_title_year(
+                name
+            )
+
+            season, episode = extract_season_episode(
+                name
+            )
+
+            if season is None:
+                continue
+
+            if not flexible_match(
+                series_title,
+                parsed_title
+            ):
+                continue
+
+            if season != target_season:
+                continue
+
+            if episode != target_episode:
+                continue
+
+            print(
+                "✅ MATCHED:",
+                name
+            )
+
+            url = await get_cached_url(
+                file_id
+            )
+
+            if not url:
+
+                data = await with_relogin(
+                    pk.get_download_url,
+                    file_id
+                )
+
+                links = data.get(
+                    "links",
+                    {}
+                )
+
+                if (
+                    "application/octet-stream"
+                    in links
+                ):
+
+                    url = links[
+                        "application/octet-stream"
+                    ]["url"]
+
+                else:
+
+                    medias = data.get(
+                        "medias",
+                        []
+                    )
+
+                    if medias:
+
+                        url = medias[0][
+                            "link"
+                        ]["url"]
+
+                if not url:
+                    continue
+
+                await set_cached_url(
+                    file_id,
+                    url
+                )
+
+            streams.append({
+                "name": "PikPak",
+
+                "title": (
+                    f"S{season:02d}"
+                    f"E{episode:02d}\n"
+                    f"{name}"
+                ),
+
+                "url": url
+            })
+
+        return {
+            "streams": streams
+        }
+
+    # ---------------------------------------------------
+    # DIRECT PIKPAK MOVIE
+    # ---------------------------------------------------
+
     if id.startswith("pikpak:"):
 
-        file_id = id.replace("pikpak:", "")
+        file_id = id.replace(
+            "pikpak:",
+            ""
+        )
 
-        url = await get_cached_url(file_id)
+        url = await get_cached_url(
+            file_id
+        )
 
         if not url:
 
@@ -382,9 +886,15 @@ async def stream(type: str, id: str):
                 file_id
             )
 
-            links = data.get("links", {})
+            links = data.get(
+                "links",
+                {}
+            )
 
-            if "application/octet-stream" in links:
+            if (
+                "application/octet-stream"
+                in links
+            ):
 
                 url = links[
                     "application/octet-stream"
@@ -392,43 +902,62 @@ async def stream(type: str, id: str):
 
             else:
 
-                medias = data.get("medias", [])
+                medias = data.get(
+                    "medias",
+                    []
+                )
 
                 if medias:
-                    url = medias[0]["link"]["url"]
+
+                    url = medias[0][
+                        "link"
+                    ]["url"]
 
             if not url:
                 return {"streams": []}
 
-            await set_cached_url(file_id, url)
+            await set_cached_url(
+                file_id,
+                url
+            )
 
         return {
             "streams": [
                 {
                     "name": "PikPak",
-                    "title": "PikPak Direct",
+
+                    "title": (
+                        "PikPak Direct"
+                    ),
+
                     "url": url
                 }
             ]
         }
 
-    # -----------------------
+    # ---------------------------------------------------
     # IMDb Movie Matching
-    # -----------------------
+    # ---------------------------------------------------
+
     if type != "movie":
         return {"streams": []}
 
-    movie_title, movie_year = get_movie_info(id)
+    movie_title, movie_year = get_cinemeta(
+        "movie",
+        id
+    )
 
-    print(f"🎬 Searching for: {movie_title} ({movie_year})")
+    print(
+        f"🎬 Searching for: "
+        f"{movie_title} ({movie_year})"
+    )
 
     files = await collect_files(pk)
-
-    streams = []
 
     for f in files:
 
         name = f.get("name")
+
         file_id = f.get("id")
 
         if not name or not file_id:
@@ -437,24 +966,34 @@ async def stream(type: str, id: str):
         if not name.lower().endswith(VIDEO_EXT):
             continue
 
-        # -----------------------
-        # Flexible title match
-        # -----------------------
-        if not title_match(movie_title, name):
+        season, episode = extract_season_episode(
+            name
+        )
+
+        # Skip TV episodes
+        if season is not None:
             continue
 
-        # -----------------------
-        # Year match
-        # -----------------------
-        if movie_year and movie_year not in name:
+        if not flexible_match(
+            movie_title,
+            name
+        ):
             continue
 
-        print(f"✅ Match found: {name}")
+        if (
+            movie_year and
+            movie_year not in name
+        ):
+            continue
 
-        # -----------------------
-        # Cached URL
-        # -----------------------
-        url = await get_cached_url(file_id)
+        print(
+            "✅ Match found:",
+            name
+        )
+
+        url = await get_cached_url(
+            file_id
+        )
 
         if not url:
 
@@ -463,9 +1002,15 @@ async def stream(type: str, id: str):
                 file_id
             )
 
-            links = data.get("links", {})
+            links = data.get(
+                "links",
+                {}
+            )
 
-            if "application/octet-stream" in links:
+            if (
+                "application/octet-stream"
+                in links
+            ):
 
                 url = links[
                     "application/octet-stream"
@@ -473,23 +1018,37 @@ async def stream(type: str, id: str):
 
             else:
 
-                medias = data.get("medias", [])
+                medias = data.get(
+                    "medias",
+                    []
+                )
 
                 if medias:
-                    url = medias[0]["link"]["url"]
+
+                    url = medias[0][
+                        "link"
+                    ]["url"]
 
             if not url:
                 continue
 
-            await set_cached_url(file_id, url)
+            await set_cached_url(
+                file_id,
+                url
+            )
 
         streams.append({
             "name": "PikPak",
+
             "title": name,
+
             "url": url
         })
 
-    print(f"🎯 Streams found: {len(streams)}")
+    print(
+        f"🎯 Streams found:"
+        f" {len(streams)}"
+    )
 
     return {
         "streams": streams
