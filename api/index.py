@@ -753,17 +753,6 @@ async def stream(type: str, id: str):
 
     streams = []
 
-# ---------------------------------------------------
-# Stream
-# ---------------------------------------------------
-
-@app.get("/stream/{type}/{id}.json")
-async def stream(type: str, id: str):
-
-    pk = await get_client()
-
-    streams = []
-
     # ---------------------------------------------------
     # SERIES STREAM
     # ---------------------------------------------------
@@ -805,6 +794,7 @@ async def stream(type: str, id: str):
         for f in files:
 
             name = f.get("name")
+
             file_id = f.get("id")
 
             if not name or not file_id:
@@ -816,6 +806,15 @@ async def stream(type: str, id: str):
             parsed_title, _ = extract_title_year(
                 name
             )
+
+            if not parsed_title:
+
+                parsed_title = name.split(".S")[0]
+
+                parsed_title = parsed_title.replace(
+                    ".",
+                    " "
+                )
 
             season, episode = extract_season_episode(
                 name
@@ -837,7 +836,7 @@ async def stream(type: str, id: str):
                 continue
 
             print(
-                "✅ SERIES MATCH:",
+                "✅ MATCHED:",
                 name
             )
 
@@ -889,9 +888,13 @@ async def stream(type: str, id: str):
 
             streams.append({
                 "name": "PikPak",
+
                 "title": (
-                    f"S{season:02d}E{episode:02d}\n{name}"
+                    f"S{season:02d}"
+                    f"E{episode:02d}\n"
+                    f"{name}"
                 ),
+
                 "url": url
             })
 
@@ -960,153 +963,143 @@ async def stream(type: str, id: str):
             "streams": [
                 {
                     "name": "PikPak",
-                    "title": "PikPak Direct",
+
+                    "title": (
+                        "PikPak Direct"
+                    ),
+
                     "url": url
                 }
             ]
         }
 
-    # ---------------------------------------------------
-    # IMDb MOVIE MATCHING
-    # ---------------------------------------------------
+# ---------------------------------------------------
+# IMDb Movie Matching (FIXED)
+# ---------------------------------------------------
 
-    if type != "movie":
-        return {"streams": []}
+if type != "movie":
+    return {"streams": []}
 
-    movie_title, movie_year = get_cinemeta(
-        "movie",
-        id
+movie_title, movie_year = get_cinemeta(
+    "movie",
+    id
+)
+
+print(
+    f"\n🎬 Searching for:"
+    f" {movie_title} ({movie_year})"
+)
+
+files = await collect_files(pk)
+
+for f in files:
+
+    name = f.get("name")
+    file_id = f.get("id")
+
+    if not name or not file_id:
+        continue
+
+    if not name.lower().endswith(VIDEO_EXT):
+        continue
+
+    season, episode = extract_season_episode(
+        name
+    )
+
+    # Skip TV episodes
+    if season is not None:
+        continue
+
+    parsed_title, parsed_year = (
+        extract_title_year(name)
     )
 
     print(
-        f"\n🎬 Searching for:"
-        f" {movie_title} ({movie_year})"
+        f"\nChecking:"
+        f" {parsed_title}"
+        f" ({parsed_year})"
     )
 
-    files = await collect_files(pk)
+    title_match = flexible_match(
+        movie_title,
+        parsed_title
+    )
 
-    for f in files:
+    year_match = (
+        not movie_year
+        or not parsed_year
+        or movie_year == parsed_year
+    )
 
-        name = f.get("name")
-        file_id = f.get("id")
+    if not title_match:
 
-        if not name or not file_id:
-            continue
+        print("❌ Title mismatch")
+        continue
 
-        if not name.lower().endswith(VIDEO_EXT):
-            continue
+    if not year_match:
 
-        season, episode = extract_season_episode(
-            name
-        )
+        print("❌ Year mismatch")
+        continue
 
-        # Skip TV episodes
-        if season is not None:
-            continue
+    print(
+        f"✅ MATCH FOUND: {name}"
+    )
 
-        parsed_title, parsed_year = (
-            extract_title_year(name)
-        )
+    url = await get_cached_url(
+        file_id
+    )
 
-        print(
-            f"\nChecking:"
-            f" {parsed_title}"
-            f" ({parsed_year})"
-        )
+    if not url:
 
-        # Flexible title match
-        title_match = flexible_match(
-            movie_title,
-            parsed_title
-        )
-
-        # Flexible year match
-        year_match = (
-            not movie_year
-            or not parsed_year
-            or movie_year == parsed_year
-        )
-
-        if not title_match:
-
-            print(
-                "❌ Title mismatch"
-            )
-
-            continue
-
-        if not year_match:
-
-            print(
-                "❌ Year mismatch"
-            )
-
-            continue
-
-        print(
-            f"✅ MATCH FOUND: {name}"
-        )
-
-        url = await get_cached_url(
+        data = await with_relogin(
+            pk.get_download_url,
             file_id
         )
 
-        if not url:
+        links = data.get(
+            "links",
+            {}
+        )
 
-            data = await with_relogin(
-                pk.get_download_url,
-                file_id
-            )
+        if (
+            "application/octet-stream"
+            in links
+        ):
 
-            links = data.get(
-                "links",
-                {}
-            )
-
-            if (
+            url = links[
                 "application/octet-stream"
-                in links
-            ):
+            ]["url"]
 
-                url = links[
-                    "application/octet-stream"
-                ]["url"]
+        else:
 
-            else:
-
-                medias = data.get(
-                    "medias",
-                    []
-                )
-
-                if medias:
-
-                    url = medias[0][
-                        "link"
-                    ]["url"]
-
-            if not url:
-                continue
-
-            await set_cached_url(
-                file_id,
-                url
+            medias = data.get(
+                "medias",
+                []
             )
 
-        streams.append({
-            "name": "⚡ [PP]",
-            "title": (
-                f"{name}"
-            ),
-            "url": url
-        })
+            if medias:
 
-    print(
-        f"\n🎯 Streams found:"
-        f" {len(streams)}"
-    )
+                url = medias[0]["link"]["url"]
 
-    return {
-        "streams": streams
-    }
-    }
+        if not url:
+            continue
+
+        await set_cached_url(
+            file_id,
+            url
+        )
+
+    streams.append({
+        "name": "⚡ [PP]",
+        "title": name,
+        "url": url
+    })
+
+print(
+    f"\n🎯 Streams found: {len(streams)}"
+)
+
+return {
+    "streams": streams
+}
