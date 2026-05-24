@@ -973,133 +973,121 @@ async def stream(type: str, id: str):
             ]
         }
 
-# ---------------------------------------------------
-# IMDb Movie Matching (FIXED)
-# ---------------------------------------------------
+    # ---------------------------------------------------
+    # IMDb Movie Matching
+    # ---------------------------------------------------
 
-if type != "movie":
-    return {"streams": []}
+    if type != "movie":
+        return {"streams": []}
 
-movie_title, movie_year = get_cinemeta(
-    "movie",
-    id
-)
-
-print(
-    f"\n🎬 Searching for:"
-    f" {movie_title} ({movie_year})"
-)
-
-files = await collect_files(pk)
-
-for f in files:
-
-    name = f.get("name")
-    file_id = f.get("id")
-
-    if not name or not file_id:
-        continue
-
-    if not name.lower().endswith(VIDEO_EXT):
-        continue
-
-    season, episode = extract_season_episode(
-        name
-    )
-
-    # Skip TV episodes
-    if season is not None:
-        continue
-
-    parsed_title, parsed_year = (
-        extract_title_year(name)
+    movie_title, movie_year = get_cinemeta(
+        "movie",
+        id
     )
 
     print(
-        f"\nChecking:"
-        f" {parsed_title}"
-        f" ({parsed_year})"
+        f"🎬 Searching for: "
+        f"{movie_title} ({movie_year})"
     )
 
-    title_match = flexible_match(
-        movie_title,
-        parsed_title
-    )
+    files = await collect_files(pk)
 
-    year_match = (
-        not movie_year
-        or not parsed_year
-        or movie_year == parsed_year
-    )
+    for f in files:
 
-    if not title_match:
+        name = f.get("name")
 
-        print("❌ Title mismatch")
-        continue
+        file_id = f.get("id")
 
-    if not year_match:
+        if not name or not file_id:
+            continue
 
-        print("❌ Year mismatch")
-        continue
+        if not name.lower().endswith(VIDEO_EXT):
+            continue
 
-    print(
-        f"✅ MATCH FOUND: {name}"
-    )
+        season, episode = extract_season_episode(
+            name
+        )
 
-    url = await get_cached_url(
-        file_id
-    )
+        # Skip TV episodes
+        if season is not None:
+            continue
 
-    if not url:
+        if not flexible_match(
+            movie_title,
+            name
+        ):
+            continue
 
-        data = await with_relogin(
-            pk.get_download_url,
+        if (
+            movie_year and
+            movie_year not in name
+        ):
+            continue
+
+        print(
+            "✅ Match found:",
+            name
+        )
+
+        url = await get_cached_url(
             file_id
         )
 
-        links = data.get(
-            "links",
-            {}
-        )
+        if not url:
 
-        if (
-            "application/octet-stream"
-            in links
-        ):
-
-            url = links[
-                "application/octet-stream"
-            ]["url"]
-
-        else:
-
-            medias = data.get(
-                "medias",
-                []
+            data = await with_relogin(
+                pk.get_download_url,
+                file_id
             )
 
-            if medias:
+            links = data.get(
+                "links",
+                {}
+            )
 
-                url = medias[0]["link"]["url"]
+            if (
+                "application/octet-stream"
+                in links
+            ):
 
-        if not url:
-            continue
+                url = links[
+                    "application/octet-stream"
+                ]["url"]
 
-        await set_cached_url(
-            file_id,
-            url
-        )
+            else:
 
-    streams.append({
-        "name": "⚡ [PP]",
-        "title": name,
-        "url": url
-    })
+                medias = data.get(
+                    "medias",
+                    []
+                )
 
-print(
-    f"\n🎯 Streams found: {len(streams)}"
-)
+                if medias:
 
-return {
-    "streams": streams
-}
+                    url = medias[0][
+                        "link"
+                    ]["url"]
+
+            if not url:
+                continue
+
+            await set_cached_url(
+                file_id,
+                url
+            )
+
+        streams.append({
+            "name": "PikPak",
+
+            "title": name,
+
+            "url": url
+        })
+
+    print(
+        f"🎯 Streams found:"
+        f" {len(streams)}"
+    )
+
+    return {
+        "streams": streams
+    }
