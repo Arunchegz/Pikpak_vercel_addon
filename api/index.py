@@ -126,20 +126,23 @@ def flexible_match(
 ):
 
     title_n = normalize(title)
-
     file_n = normalize(filename)
-
     words = title_n.split()
+    
+    if not words:
+        return False
 
     matched = sum(
         1 for w in words
         if w in file_n
     )
 
-    required = max(
-        2,
-        len(words) // 2
-    )
+    # FIX: Require exact word counts for short titles (1 or 2 words).
+    # For longer titles (3+ words), require at least half of the words to match.
+    if len(words) <= 2:
+        required = len(words)
+    else:
+        required = max(2, len(words) // 2)
 
     return matched >= required
 
