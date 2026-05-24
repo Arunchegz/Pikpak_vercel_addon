@@ -753,6 +753,17 @@ async def stream(type: str, id: str):
 
     streams = []
 
+# ---------------------------------------------------
+# Stream
+# ---------------------------------------------------
+
+@app.get("/stream/{type}/{id}.json")
+async def stream(type: str, id: str):
+
+    pk = await get_client()
+
+    streams = []
+
     # ---------------------------------------------------
     # SERIES STREAM
     # ---------------------------------------------------
@@ -794,7 +805,6 @@ async def stream(type: str, id: str):
         for f in files:
 
             name = f.get("name")
-
             file_id = f.get("id")
 
             if not name or not file_id:
@@ -806,15 +816,6 @@ async def stream(type: str, id: str):
             parsed_title, _ = extract_title_year(
                 name
             )
-
-            if not parsed_title:
-
-                parsed_title = name.split(".S")[0]
-
-                parsed_title = parsed_title.replace(
-                    ".",
-                    " "
-                )
 
             season, episode = extract_season_episode(
                 name
@@ -836,7 +837,7 @@ async def stream(type: str, id: str):
                 continue
 
             print(
-                "✅ MATCHED:",
+                "✅ SERIES MATCH:",
                 name
             )
 
@@ -888,13 +889,9 @@ async def stream(type: str, id: str):
 
             streams.append({
                 "name": "PikPak",
-
                 "title": (
-                    f"S{season:02d}"
-                    f"E{episode:02d}\n"
-                    f"{name}"
+                    f"S{season:02d}E{episode:02d}\n{name}"
                 ),
-
                 "url": url
             })
 
@@ -963,18 +960,14 @@ async def stream(type: str, id: str):
             "streams": [
                 {
                     "name": "PikPak",
-
-                    "title": (
-                        "PikPak Direct"
-                    ),
-
+                    "title": "PikPak Direct",
                     "url": url
                 }
             ]
         }
 
     # ---------------------------------------------------
-    # IMDb Movie Matching
+    # IMDb MOVIE MATCHING
     # ---------------------------------------------------
 
     if type != "movie":
@@ -986,8 +979,8 @@ async def stream(type: str, id: str):
     )
 
     print(
-        f"🎬 Searching for: "
-        f"{movie_title} ({movie_year})"
+        f"\n🎬 Searching for:"
+        f" {movie_title} ({movie_year})"
     )
 
     files = await collect_files(pk)
@@ -995,7 +988,6 @@ async def stream(type: str, id: str):
     for f in files:
 
         name = f.get("name")
-
         file_id = f.get("id")
 
         if not name or not file_id:
@@ -1012,21 +1004,47 @@ async def stream(type: str, id: str):
         if season is not None:
             continue
 
-        if not flexible_match(
+        parsed_title, parsed_year = (
+            extract_title_year(name)
+        )
+
+        print(
+            f"\nChecking:"
+            f" {parsed_title}"
+            f" ({parsed_year})"
+        )
+
+        # Flexible title match
+        title_match = flexible_match(
             movie_title,
-            name
-        ):
+            parsed_title
+        )
+
+        # Flexible year match
+        year_match = (
+            not movie_year
+            or not parsed_year
+            or movie_year == parsed_year
+        )
+
+        if not title_match:
+
+            print(
+                "❌ Title mismatch"
+            )
+
             continue
 
-        if (
-            movie_year and
-            movie_year not in name
-        ):
+        if not year_match:
+
+            print(
+                "❌ Year mismatch"
+            )
+
             continue
 
         print(
-            "✅ Match found:",
-            name
+            f"✅ MATCH FOUND: {name}"
         )
 
         url = await get_cached_url(
@@ -1076,18 +1094,19 @@ async def stream(type: str, id: str):
             )
 
         streams.append({
-            "name": "PikPak",
-
-            "title": name,
-
+            "name": "⚡ [PP]",
+            "title": (
+                f"{name}"
+            ),
             "url": url
         })
 
     print(
-        f"🎯 Streams found:"
+        f"\n🎯 Streams found:"
         f" {len(streams)}"
     )
 
     return {
         "streams": streams
+    }
     }
