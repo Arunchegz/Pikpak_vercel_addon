@@ -242,6 +242,40 @@ def get_cinemeta(
     )
 
 # ---------------------------------------------------
+
+def extract_quality(filename: str):
+
+    filename = filename.lower()
+
+    patterns = [
+        "2160p",
+        "4k",
+        "1080p",
+        "720p",
+        "480p"
+    ]
+
+    for q in patterns:
+        if q in filename:
+            return q.upper()
+
+    return "Unknown"
+
+
+def clean_filename(filename: str):
+
+    name = re.sub(
+        r"\.(mkv|mp4|avi|mov|webm|flv|ts)$",
+        "",
+        filename,
+        flags=re.I
+    )
+
+    name = name.replace(".", " ")
+    name = name.replace("_", " ")
+
+    return name.strip()
+
 # PikPak Client
 # ---------------------------------------------------
 
@@ -889,13 +923,15 @@ async def stream(type: str, id: str):
                     url
                 )
 
+            quality = extract_quality(name)
+            display_name = clean_filename(name)
+
             streams.append({
-                "name": "PikPak",
+                "name": "▶ Direct Play",
 
                 "title": (
-                    f"S{season:02d}"
-                    f"E{episode:02d}\n"
-                    f"{name}"
+                    f"⚡ {quality}\n"
+                    f"📁 {display_name}"
                 ),
 
                 "url": url
@@ -1078,10 +1114,16 @@ async def stream(type: str, id: str):
                 url
             )
 
-        streams.append({
-            "name": "PikPak",
+        quality = extract_quality(name)
+        display_name = clean_filename(name)
 
-            "title": name,
+        streams.append({
+            "name": "▶ Direct Play",
+
+            "title": (
+                f"⚡ {quality}\n"
+                f"📁 {display_name}"
+            ),
 
             "url": url
         })
