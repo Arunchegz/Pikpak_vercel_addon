@@ -800,28 +800,49 @@ async def stream(type: str, id: str):
             decoded_id
         )
 
-        match = re.match(
+        match_pikpak = re.match(
             r"(pikpakseries:[^:]+):(\d+):(\d+)",
             decoded_id
         )
 
-        if not match:
+        match_imdb = re.match(
+            r"(tt\d+):(\d+):(\d+)",
+            decoded_id
+        )
+
+        series_title = ""
+        target_season = 0
+        target_episode = 0
+
+        if match_pikpak:
+            series_id = match_pikpak.group(1)
+            target_season = int(match_pikpak.group(2))
+            target_episode = int(match_pikpak.group(3))
+            
+            series_title = series_id.replace(
+                "pikpakseries:",
+                ""
+            )
+            
+        elif match_imdb:
+            imdb_id = match_imdb.group(1)
+            target_season = int(match_imdb.group(2))
+            target_episode = int(match_imdb.group(3))
+            
+            # Fetch the actual show name from Cinemeta using the IMDb ID
+            fetched_title, _ = get_cinemeta(
+                "series",
+                imdb_id
+            )
+            
+            if not fetched_title:
+                return {"streams": []}
+                
+            series_title = fetched_title
+            print(f"🎬 Cinemeta Series Title: {series_title}")
+            
+        else:
             return {"streams": []}
-
-        series_id = match.group(1)
-
-        target_season = int(
-            match.group(2)
-        )
-
-        target_episode = int(
-            match.group(3)
-        )
-
-        series_title = series_id.replace(
-            "pikpakseries:",
-            ""
-        )
 
         files = await collect_files(pk)
 
@@ -937,7 +958,6 @@ async def stream(type: str, id: str):
         return {
             "streams": streams
         }
-
     # ---------------------------------------------------
     # DIRECT PIKPAK MOVIE
     # ---------------------------------------------------
