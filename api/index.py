@@ -1133,3 +1133,5 @@ async def stream(type: str, id: str):
     return {
         "streams": streams
     }
+# Required by Vercel
+application = app 
