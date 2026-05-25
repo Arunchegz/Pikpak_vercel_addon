@@ -488,12 +488,23 @@ async def movie_catalog():
         if season is not None:
             continue
 
-        metas.append({
-            "id": f"pikpak:{fid}",
+        quality = extract_quality(name)
+display_name = clean_filename(name)
 
-            "type": "movie",
+metas.append({
+    "id": f"pikpak:{fid}",
+    "type": "movie",
 
-            "name": name,
+    "name": display_name,
+
+    "description": f"⚡ {quality}",
+
+    "poster": (
+        "https://upload.wikimedia.org/"
+        "wikipedia/commons/8/8c/"
+        "PikPak_logo.png"
+    )
+})
 
             "poster": (
                 "https://upload.wikimedia.org/"
@@ -557,14 +568,28 @@ async def series_catalog():
 
         print("📺 SERIES:", title)
 
-        metas.append({
-            "id": (
-                f"pikpakseries:{normalized}"
-            ),
+quality = extract_quality(name)
+display_title = clean_filename(title)
 
-            "type": "series",
+metas.append({
+    "id": (
+        f"pikpakseries:{normalized}"
+    ),
 
-            "name": title,
+    "type": "series",
+
+    "name": display_title,
+
+    "description": f"⚡ {quality}",
+
+    "poster": (
+        "https://upload.wikimedia.org/"
+        "wikipedia/commons/8/8c/"
+        "PikPak_logo.png"
+    ),
+
+    "posterShape": "poster"
+})
 
             "poster": (
                 "https://upload.wikimedia.org/"
