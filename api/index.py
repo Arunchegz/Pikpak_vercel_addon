@@ -1004,7 +1004,7 @@ async def stream(type: str, id: str):
                     "name": "PikPak",
 
                     "title": (
-                        "PikPak Direct"
+                        "☁️ Pikpak"
                     ),
 
                     "url": url
@@ -1118,7 +1118,7 @@ async def stream(type: str, id: str):
         display_name = clean_filename(name)
 
         streams.append({
-            "name": "▶ Direct Play",
+            "name": "☁️ Pikpak",
 
             "title": (
                 f"⚡ {quality}\n"
